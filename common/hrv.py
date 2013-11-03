@@ -1,13 +1,54 @@
 import numpy as np
 import lomb
+import time
 
-STORE_ALL_ELEMENTS = False
+STORE_ALL_ELEMENTS = True
+
+
+class TimeSeries():
+    def __init__( self ):
+        self.series = np.array([])
+        self.smpltime = np.array([])
+        self.realtime = np.array([])
+        self.start_time = 0
+        self.cumultime = 0
+        self.idx_start = 0
+
+    def setStartTime( self ):
+        self.start_time = time.time()
+
+    def add( self, value, sampltime_ms ):
+        self.series = np.append( self.series, value )
+        self.smpltime = np.append( self.smpltime, self.cumultime )
+        self.realtime = np.append( self.realtime, self.start_time+float(self.cumultime)/1000 )
+        self.cumultime += sampltime_ms
+
+    def getSampleIndex( self, window_size ):
+        """ Get the index in the sample time array where the value
+         correspond to a number of 'seconds' back from the last element """
+        self.idx_start = np.where( self.smpltime > self.smpltime[-1]-window_size*1000 )[0][0]
+        return self.idx_start
+
+class RRIntervals( TimeSeries ):
+    def __init__( self ):
+        TimeSeries.__init__( self )
+
+    def add_rrinterval( self, rri_ms ):
+        self.add( rri_ms, rri_ms )
+
+class BreathingWave( TimeSeries ):
+    def __init__( self ):
+        TimeSeries.__init__( self )
+
+    def add_breath( self, value ):
+        # The breathing data are sampled at 18 Hz (56ms)
+        self.add( value, 56 )
+
 
 class RRI_BW_Data():
     '''
     '''
     def __init__( self ):
-        self.window_duration = 10    # default 30 secs window
 
         self.prev_val = self.prev_rri = 0
         self.rri_series = np.array([])
@@ -25,9 +66,11 @@ class RRI_BW_Data():
         self.VLFpwr = 0
         self.LFpwr = 0
         self.HFpwr = 0
+
+        self.idx_start = 0
         
     def setStartTime(self, starttime):
-        self.rri_realtime = np.append(self.rri_realtime, starttime)
+        self.rri_realtime = np.append( self.rri_realtime, starttime )
         self.bw_realtime = np.append( self.bw_realtime, starttime )
 
     def add_rrinterval( self, rri_ms ):
@@ -36,23 +79,16 @@ class RRI_BW_Data():
         self.rri_smpltime = np.append( self.rri_smpltime, self.rri_cumulativeTime )
         self.rri_realtime = np.append( self.rri_realtime, self.rri_realtime[-1]+float(rri_ms)/1000 )
 
-        if STORE_ALL_ELEMENTS is not True:
-            self._getSampleIndex()
-            # remove the first element in the array
-            if self.idx_start != 0:
-                self.rri_series = np.delete(self.rri_series, 0)
-                self.rri_smpltime = np.delete( self.rri_smpltime, 0)
-                self.rri_realtime = np.delete( self.rri_realtime, 0)
-
     def add_breathing( self, value ):
-        self.bw_series = np.append(self.bw_series, value)
+        self.bw_series = np.append( self.bw_series, value )
         # The breathing data are sampled at 18 Hz (56ms)
-        self.bw_realtime = np.append(self.bw_realtime, self.bw_realtime[-1]+float(56)/1000)
+        self.bw_realtime = np.append( self.bw_realtime, self.bw_realtime[-1]+float(56)/1000 )
 
-    def _getSampleIndex( self ):
+    def getSampleIndex( self, window_size ):
         """ Get the index in the sample time array where the value
          correspond to a number of 'seconds' back from the last element """
-        self.idx_start = np.where(self.rri_smpltime > self.rri_smpltime[-1]-self.window_duration*1000)[0][0]
+        self.idx_start = np.where( self.rri_smpltime > self.rri_smpltime[-1]-window_size*1000 )[0][0]
+        return self.idx_start
 
     def setAnalysisWindow( self, seconds ):
         self.window_duration = seconds
