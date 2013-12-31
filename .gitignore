@@ -1,2 +1,4 @@
 control_bioharness.py
 *.psd
+.idea/
+settings.ini
