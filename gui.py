@@ -2,9 +2,9 @@ import sys, os, platform
 import datetime
 import time
 
-from guidata.qt.QtGui import (QWidget, QMainWindow, QVBoxLayout, qApp, QTextEdit,\
-                               QFont, QColor, QLabel, QAction, QIcon, QHBoxLayout, \
-                               QLineEdit, QSizePolicy, QMessageBox, QPushButton, \
+from guidata.qt.QtGui import (QWidget, QMainWindow, QVBoxLayout, qApp, QTextEdit,
+                               QFont, QColor, QLabel, QAction, QIcon, QHBoxLayout,
+                               QLineEdit, QSizePolicy, QMessageBox, QPushButton,
                             )
 from guidata.qtwidgets import DockableWidget
 from guidata.qt.QtCore import (Qt, QThread, QSettings, QTimer, SIGNAL, QT_VERSION_STR, PYQT_VERSION_STR)
@@ -21,7 +21,7 @@ from PyQt4.Qwt5.Qwt import QwtPlot, QwtScaleDraw, QwtText
 # From own files:
 #sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir)))
 from common.hrv import RRI_BW_Data, RRIntervals, BreathingWave
-from common.device_zephyr import ZephyrConnect, USE_TEST_DATA, list_serial_ports
+from common.device_zephyr import ZephyrConnect, VIRTUAL_SERIAL, list_serial_ports
 from common.data_storage import DataStorage
 import zephyr
 #from noise import MakeNoise
@@ -96,6 +96,7 @@ class MainWindow( QMainWindow ):
 
         self.settings_storage.beginGroup('Misc')
         self.appsettings.dataset.timedsession = self.settings_storage.value('TimedDuration', 5).toInt()[0]
+        self.appsettings.dataset.comport = self.settings_storage.value('COM_Port').toInt()[0]
         self.settings_storage.endGroup()
 
         self.settings_storage.beginGroup('Storage')
@@ -182,7 +183,6 @@ class MainWindow( QMainWindow ):
         self.playAction.triggered.connect( self.start_free_session_button )
         self.stopAction = QAction(QIcon('common/stop.png'), 'Stop', self)
         self.stopAction.triggered.connect( self.stop_button )
-        self.stopAction.setEnabled( False )
         self.timedAction = QAction(QIcon('common/timed.png'), 'Start', self)
         self.timedAction.triggered.connect( self.start_timed_session_button )
 
@@ -209,29 +209,23 @@ class MainWindow( QMainWindow ):
         self.sessiontype = 'free'
         self.zephyr_connect = ZephyrConnect()
         self.connect( self.zephyr_connect, SIGNAL( 'Message' ), self.printmessage )
+        self.connect( self.zephyr_connect, SIGNAL( 'newRRI' ), self.update_RR_plot )
+        self.connect( self.zephyr_connect, SIGNAL( 'newBW' ), self.update_BW_plot )
 
         # the button are disabled by default
         # they are enabled if the connection to the device is successfull
-        if USE_TEST_DATA is False:
-            self.playAction.setEnabled( False )
-            self.timedAction.setEnabled( False )
+        self.stopAction.setEnabled( False )
+        self.playAction.setEnabled( False )
+        self.timedAction.setEnabled( False )
 
-        # the connection to the device is automatically tested
-        # self.zephyr_connect = ZephyrConnect()
-        # # we connect to the device immediately if real data is used
-        # # otherwise, the thread is started once we click the 'start' button
-        # #if USE_TEST_DATA is False:
-        #     #self.zephyr_connect.start()
-        #
-        # #if self.zephyr_connect.connected:
-        #
-        # self.connect( self.zephyr_connect, SIGNAL( 'newRRI' ), self.update_RR_plot )
-        # self.connect( self.zephyr_connect, SIGNAL( 'newBW' ), self.update_BW_plot )
 
+        # if VIRTUAL_SERIAL is False:
+
+        # else:
+        #     self.playAction.setEnabled( True )
+        #     self.timedAction.setEnabled( True )
+        #     self.connectAction.setEnabled( False )
         #
-        # self.logmessage("BioHarness 3.0 with serial number '%s' connected." % self.zephyr_connect.SerialNumber )
-        # self.playAction.setEnabled( True )
-        # self.timedAction.setEnabled( True )
 
         # Data storage configuration
         self.datastorage = DataStorage( self.appsettings.dataset )
@@ -274,6 +268,7 @@ class MainWindow( QMainWindow ):
 
             self.settings_storage.beginGroup('Misc')
             self.settings_storage.setValue('TimedDuration', self.appsettings.dataset.timedsession )
+            self.settings_storage.setValue('COM_Port', self.appsettings.dataset.comport )
             self.settings_storage.endGroup()
 
             self.settings_storage.beginGroup('Storage')
@@ -337,29 +332,64 @@ class MainWindow( QMainWindow ):
         self.bwplot.update( self.ds_bw.realtime, self.ds_bw.series )
 
     def printmessage( self, message ):
-
         if isinstance(message, zephyr.message.SerialNumber):
-            self.logmessage("Successfully connected to the device %s." % message.Number )
-            self.timeout.stop()
-            del self.timeout
+            if self.zephyr_connect.connected is False:
+                self.logmessage("Successfully connected to the device %s." % message.Number.strip() )
+                self._toggle_connect_button()
+                if self.timeout:
+                    self.timeout.stop()
+                    del self.timeout
 
         if isinstance(message, zephyr.message.BatteryStatus):
             self.logmessage("Battery charge is %d%%" % message.Charge )
 
+    def _toggle_connect_button(self):
+        if self.zephyr_connect.connected is True:
+            self.connectAction.setIcon(QIcon('common/connected.png'))
+            self.connectAction.setToolTip("Disconnect")
+            self.connectAction.triggered.disconnect( self.connect_button )
+            self.connectAction.triggered.connect( self.disconnect_button )
+            self.playAction.setEnabled( True )
+            self.timedAction.setEnabled( True )
+        else:
+            self.connectAction.setIcon(QIcon('common/disconnected.png'))
+            self.connectAction.setToolTip("Connect")
+            self.connectAction.triggered.disconnect( self.disconnect_button )
+            self.connectAction.triggered.connect( self.connect_button )
+            self.playAction.setEnabled( False )
+            self.timedAction.setEnabled( False )
+
     def connect_button(self):
+        # The connect button is first trying to open the com port. If the port can be opened,
+        # the zephyr protocol functions are instancied and a message is send to the device
+        # (the thread is started for this purpose and to let the reception of the response).
+        # The device has 3 seconds to respond (a timeout is started to close the serial
+        # and terminate the thread in case of no response). When the device responds a signal 'Message'
+        # is sent to the GUI (the message is the Serial Number of the device).
         if self.zephyr_connect.connectTo( self.appsettings.dataset.comport ):
             self.zephyr_connect.start()
-            self.timeout = QTimer( self )
-            self.connect( self.timeout, SIGNAL( 'timeout()' ), self.connectionTimeout )
-            self.timeout.setSingleShot(True)
-            self.timeout.start(3000)
+            if VIRTUAL_SERIAL is False:
+                self.timeout = QTimer( self )
+                self.connect( self.timeout, SIGNAL( 'timeout()' ), self.connectionTimeout )
+                self.timeout.setSingleShot(True)
+                self.timeout.start(3000)
+            else:
+                self.logmessage("Serial virtualization in use.")
+                self._toggle_connect_button()
         else:
             self.logmessage( "Fail to open port COM%d!" % (self.appsettings.dataset.comport+1), 'error' )
 
+    def disconnect_button(self):
+        self.zephyr_connect.terminate()
+        if self.zephyr_connect.wait():
+            self._toggle_connect_button()
+            self.logmessage( "Successfully disconnected from the device." )
+
     def connectionTimeout(self):
         self.logmessage("Unable to connected to the device on COM%d." % (self.appsettings.dataset.comport+1), 'error' )
-        self.zephyr_connect.ser.close()
         self.zephyr_connect.terminate()
+        if self.timeout:
+            del self.timeout
 
     def start_free_session_button( self ):
         self.sessiontype = 'free'
@@ -381,8 +411,9 @@ class MainWindow( QMainWindow ):
             self.session_stop()
 
     def session_start( self ):
-        if USE_TEST_DATA is True:
-            self.zephyr_connect.start()
+        if VIRTUAL_SERIAL is True:
+            self.zephyr_connect.resume()
+
         for a in self.appsettings.dataset.bh_packets:
             if a == 0: self.zephyr_connect.enablePacket('RRDATA')
             elif a == 1: self.zephyr_connect.enablePacket('BREATHING')
@@ -395,11 +426,12 @@ class MainWindow( QMainWindow ):
         self.playAction.setEnabled( False )
         self.timedAction.setEnabled( False )
         self.stopAction.setEnabled( True )
+        self.connectAction.setEnabled( False )
 
     def session_stop(self):
-        if USE_TEST_DATA is True:
-            self.zephyr_connect.running = False # doesn't work yet!
-            self.zephyr_connect.terminate()     # doesn't work yet!
+        if VIRTUAL_SERIAL is True:
+            self.zephyr_connect.pause()
+
         for a in self.appsettings.dataset.bh_packets:
             if a == 0: self.zephyr_connect.disablePacket('RRDATA')
             elif a == 1: self.zephyr_connect.disablePacket('BREATHING')
@@ -408,6 +440,7 @@ class MainWindow( QMainWindow ):
         self.playAction.setEnabled( True )
         self.timedAction.setEnabled( True )
         self.stopAction.setEnabled( False )
+        self.connectAction.setEnabled( True )
 
         # store the current session?
         if self.appsettings.dataset.enable_database or self.appsettings.dataset.enable_files:

@@ -12,19 +12,10 @@ import platform
 import serial
 import glob
 import time
+import logging
 
 # Set to FALSE to use the real data coming from the device
-USE_TEST_DATA = False
-
-if USE_TEST_DATA is True:
-    test_data_dir = "A:\\Projects\\ecgmuzbak\\sft\\py\\zephyr-bt\\test_data"
-    ser = TimedVirtualSerial(test_data_dir + "/120-second-bt-stream.dat",
-                                test_data_dir + "/120-second-bt-stream-timing.csv")
-else:
-    serial_port_dict = {"Darwin": "/dev/cu.BHBHT001931-iSerialPort1",
-                        "Windows": 4}
-    serial_port = serial_port_dict[platform.system()]
-    #ser = serial.Serial(serial_port)
+VIRTUAL_SERIAL = True
 
 # A function that tries to list serial ports on most common platforms
 def list_serial_ports():
@@ -57,23 +48,31 @@ class ZephyrConnect( QThread ):
         self.prev_val = 0
         self.SerialNumber = ''
         self.connected = False
+        self.paused = False
         self.PacketType = {'BREATHING':0x15,
                            'ECG':0x16,
                            'RRDATA':0x19,
                            'ACC':0x1E}
 
+        zephyr.configure_root_logger()
+
     def connectTo(self, comport):
         try:
-            self.ser = serial.Serial( comport )
-            self.ser.close()
-            self.ser.open() # in case the port is already in use
+            if VIRTUAL_SERIAL is True:
+                test_data_dir = "A:\\Projects\\ecgmuzbak\\sft\\py\\zephyr-bt\\test_data"
+                self.ser = TimedVirtualSerial(test_data_dir + "/120-second-bt-stream.dat",
+                                         test_data_dir + "/120-second-bt-stream-timing.csv")
+                self.connected = True
+            else:
+                self.ser = serial.Serial( comport )
+            self.ser.close() # in case the port is already in use
+            self.ser.open()
             self.initialize_device()
             return True
         except serial.SerialException:
             return False
 
     def initialize_device(self):
-        zephyr.configure_root_logger()
 
         collector = MeasurementCollector()
 
@@ -94,37 +93,46 @@ class ZephyrConnect( QThread ):
         self.delayed_stream_thread = DelayedRealTimeStream(collector, [self.callback], 1.2)
 
         self.protocol = BioHarnessProtocol(self.ser, [message_parser.parse_data])
-        self.protocol.add_initilization_message( 0x0B, []) # get Serial Number
-        #self.connect( self, SIGNAL( 'Message' ), self._callback_serial_test )
 
-        # by default disable every packet:
-        self.protocol.add_initilization_message(self.PacketType['BREATHING'], [0]) # disable breathing waveform
-        self.protocol.add_initilization_message(self.PacketType['ECG'], [0]) # disable ecg waveform
-        self.protocol.add_initilization_message(self.PacketType['RRDATA'], [0]) # disable rr data
-        self.protocol.add_initilization_message(self.PacketType['ACC'], [0]) # disable accelerometer waveform
+        if VIRTUAL_SERIAL is False :
+            self.protocol.add_initilization_message( 0x0B, []) # get Serial Number
+            self.connect( self, SIGNAL( 'Message' ), self._callback_serial_test )
+            # by default disable every packet:
+            self.protocol.add_initilization_message(self.PacketType['BREATHING'], [0]) # disable breathing waveform
+            self.protocol.add_initilization_message(self.PacketType['ECG'], [0]) # disable ecg waveform
+            self.protocol.add_initilization_message(self.PacketType['RRDATA'], [0]) # disable rr data
+            self.protocol.add_initilization_message(self.PacketType['ACC'], [0]) # disable accelerometer waveform
 
-    def _callback_serial_test(self, message ):
+    def _callback_serial_test( self, message ):
        # Message is the serial number
-       print message.Number
+       self.disconnect(self, SIGNAL( 'Message' ), self._callback_serial_test)
        if message.Number != '':
            self.SerialNumber = message.Number
            self.connected = True
 
     def run(self):
         self.running = True
+        self.delayed_stream_thread.start()
+        self.protocol.start()
         while self.running:
-            self.delayed_stream_thread.start()
-            try:
-                self.protocol.run()
-            except EOFError:
-                pass
-    
-            self.delayed_stream_thread.terminate()
-            self.delayed_stream_thread.join()
+            pass
+        logging.debug("ZephyrConnect QThread is out of the while loop.")
 
     def terminate(self):
-        self.running = False
         self.protocol.terminate()
+        self.protocol.join()
+        self.delayed_stream_thread.terminate()
+        self.delayed_stream_thread.join()
+        self.ser.close()
+        self.running = False
+        self.connected = False
+        del self.protocol
+
+    def resume(self):
+        self.ser.paused = False
+
+    def pause(self):
+        self.ser.paused = True
 
     def callback(self, value_name, value):    
         if value_name is 'rr' and value != self.prev_val:
@@ -140,7 +148,6 @@ class ZephyrConnect( QThread ):
 
     def anyotherpackets( self, message ):
         self.emit( SIGNAL( 'Message' ), message )
-        #print message
 
     def sendmessage(self, message_id, payload):
         self.protocol.add_initilization_message(message_id, payload)
