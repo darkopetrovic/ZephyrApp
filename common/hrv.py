@@ -1,12 +1,37 @@
 import numpy as np
 import lomb
 import time
+import MySQLdb as mdb
 
 STORE_ALL_ELEMENTS = True
 
 
-class TimeSeries():
+class TimeSeriesContainer():
+    """ Container to store and perform operations
+        on all times series.
+    """
     def __init__( self ):
+        self.ts_rri = RRIntervals()
+        self.ts_bw = BreathingWave()
+
+    def isNotEmpty(self):
+        if self.ts_rri.series.size or self.ts_bw.series.size:
+            return True
+        else:
+            return False
+
+    def clearContainer(self):
+        self.ts_rri.clear()
+        self.ts_bw.clear()
+
+
+class TimeSeries():
+    """ Class for general functions on times series objects.
+    """
+    def __init__( self ):
+        self.clear()
+
+    def clear(self):
         self.series = np.array([])
         self.smpltime = np.array([])
         self.realtime = np.array([])
@@ -28,6 +53,7 @@ class TimeSeries():
          correspond to a number of 'seconds' back from the last element """
         self.idx_start = np.where( self.smpltime > self.smpltime[-1]-window_size*1000 )[0][0]
         return self.idx_start
+
 
 class RRIntervals( TimeSeries ):
     def __init__( self ):

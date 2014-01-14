@@ -20,7 +20,7 @@ from PyQt4.Qwt5.Qwt import QwtPlot, QwtScaleDraw, QwtText
 
 # From own files:
 #sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir)))
-from common.hrv import RRI_BW_Data, RRIntervals, BreathingWave
+from common.hrv import RRIntervals, BreathingWave, TimeSeriesContainer
 from common.device_zephyr import ZephyrConnect, VIRTUAL_SERIAL, list_serial_ports
 from common.data_storage import DataStorage
 import zephyr
@@ -29,6 +29,7 @@ import zephyr
 APP_NAME = _("Zephyr Biofeedback")
 VERSION = '1.0.0'
 
+# Activate settings with a checkbox
 DataStorage_database    = ValueProp(False)
 DataStorage_files       = ValueProp(False)
 
@@ -203,9 +204,9 @@ class MainWindow( QMainWindow ):
 
         # Objects setup -------------------------------------------------------------------------------------------
         # ---------------------------------------------------------------------------------------------------------
-
-        self.ds_rri = RRIntervals()
-        self.ds_bw = BreathingWave()
+        # self.timeseriescontainer.ts_rri = RRIntervals()
+        # self.timeseriescontainer.ts_bw = BreathingWave()
+        self.timeseriescontainer = TimeSeriesContainer()
         self.sessiontype = 'free'
         self.zephyr_connect = ZephyrConnect()
         self.connect( self.zephyr_connect, SIGNAL( 'Message' ), self.printmessage )
@@ -218,17 +219,10 @@ class MainWindow( QMainWindow ):
         self.playAction.setEnabled( False )
         self.timedAction.setEnabled( False )
 
-
-        # if VIRTUAL_SERIAL is False:
-
-        # else:
-        #     self.playAction.setEnabled( True )
-        #     self.timedAction.setEnabled( True )
-        #     self.connectAction.setEnabled( False )
-        #
-
         # Data storage configuration
-        self.datastorage = DataStorage( self.appsettings.dataset )
+        # Data storage need the application settings for db credentials
+        # and the container where time series are stored
+        self.datastorage = DataStorage( self.appsettings.dataset, self.timeseriescontainer )
 
     def sendbhcmd( self ):
         cmd =  int(str(self.bhcmdinput.text()), 16)
@@ -314,22 +308,22 @@ class MainWindow( QMainWindow ):
     def update_RR_plot( self, value ):
         # Store value in the data-set. We store every value in the dataset
         # but we display only a certain duration specified by 'self.rrplot.window_length'
-        self.ds_rri.add_rrinterval( value )
+        self.timeseriescontainer.ts_rri.add_rrinterval( value )
         # Set the data to the curve with values from the data-set (ds_*) and update the plot 
-        self.rrplot.startIdx = self.ds_rri.getSampleIndex( self.rrplot.window_length )
-        self.rrplot.update( self.ds_rri.realtime, self.ds_rri.series )
+        self.rrplot.startIdx = self.timeseriescontainer.ts_rri.getSampleIndex( self.rrplot.window_length )
+        self.rrplot.update( self.timeseriescontainer.ts_rri.realtime, self.timeseriescontainer.ts_rri.series )
 
         #self.logmessage( "Incoming RRI: %i ms" % value )
-        #sdnn = float("%3.1f" % self.ds_rri.compute_SDNN())
+        #sdnn = float("%3.1f" % self.timeseriescontainer.ts_rri.compute_SDNN())
         #self.lbl_sdnn.setText( "SDNN: %3.1f ms" % sdnn )
 
     def update_BW_plot( self, value ):
         # Store value in the data-set. We store every value in the dataset
         # but we display only a certain duration specified by 'self.rrplot.window_length'
-        self.ds_bw.add_breath( value )
+        self.timeseriescontainer.ts_bw.add_breath( value )
         # Set the data to the curve with values from the data-set and update the plot 
-        self.bwplot.startIdx = self.ds_bw.getSampleIndex( self.bwplot.window_length )
-        self.bwplot.update( self.ds_bw.realtime, self.ds_bw.series )
+        self.bwplot.startIdx = self.timeseriescontainer.ts_bw.getSampleIndex( self.bwplot.window_length )
+        self.bwplot.update( self.timeseriescontainer.ts_bw.realtime, self.timeseriescontainer.ts_bw.series )
 
     def printmessage( self, message ):
         if isinstance(message, zephyr.message.SerialNumber):
@@ -411,17 +405,20 @@ class MainWindow( QMainWindow ):
             self.session_stop()
 
     def session_start( self ):
+        self.timeseriescontainer.clearContainer()
+
         if VIRTUAL_SERIAL is True:
             self.zephyr_connect.resume()
 
         for a in self.appsettings.dataset.bh_packets:
-            if a == 0: self.zephyr_connect.enablePacket('RRDATA')
-            elif a == 1: self.zephyr_connect.enablePacket('BREATHING')
+            if a == 0:
+                self.zephyr_connect.enablePacket('RRDATA')
+                self.timeseriescontainer.ts_rri.setStartTime()
+            elif a == 1:
+                self.zephyr_connect.enablePacket('BREATHING')
+                self.timeseriescontainer.ts_bw.setStartTime()
 
         self.timer.start()
-        # dataset time start:
-        self.ds_rri.setStartTime()
-        self.ds_bw.setStartTime()
         # handle graphical change:
         self.playAction.setEnabled( False )
         self.timedAction.setEnabled( False )
@@ -435,6 +432,7 @@ class MainWindow( QMainWindow ):
         for a in self.appsettings.dataset.bh_packets:
             if a == 0: self.zephyr_connect.disablePacket('RRDATA')
             elif a == 1: self.zephyr_connect.disablePacket('BREATHING')
+
         self.timer.stop()
         # handle graphical change:
         self.playAction.setEnabled( True )
@@ -446,7 +444,10 @@ class MainWindow( QMainWindow ):
         if self.appsettings.dataset.enable_database or self.appsettings.dataset.enable_files:
             sel = QMessageBox.question(self, "Save Session", "Store the current session?", "Yes", "No")
             if sel == 0:
-                self.datastorage.store_session()
+                minutes,seconds = self.timer.getRunningTime()
+                duration = str(minutes) + ":" + str(seconds)
+                self.datastorage.store_session( duration )
+                self.logmessage("Session stored in database.")
 
 
 class DockablePlotWidget( DockableWidget ):
@@ -500,28 +501,29 @@ class DateTimeScaleDraw( QwtScaleDraw ):
 class Timer( QThread ):
     def __init__( self, parent ):
         QThread.__init__(self, parent)
-        self.stopped = False
         self.currsecond = 0
         self.asc = True
+        self.initseconds = 0
 
-        self.toolbar_time = parent.addToolBar('Time')
+        self.toolbar_time = parent.addToolBar( 'Time' )
         self.toolbar_time.setMovable( False )
         self.timer = QLineEdit()
         self.timer.setStyleSheet("QLineEdit { font-size: 19px; font-family: Courier New; \
                                 border-style: outset; border-radius: 10px; \
                                 font-weight:bold; text-align:center}")
-        self.timer.setFixedWidth(80)
+        self.timer.setFixedWidth( 80 )
         self.timer.setReadOnly( True )
         self.timer.setAlignment( Qt.AlignHCenter )
 
         left_spacer = QWidget()
-        left_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        left_spacer.setSizePolicy( QSizePolicy.Expanding, QSizePolicy.Expanding )
         self.toolbar_time.addWidget( left_spacer )
         self.toolbar_time.addWidget( self.timer )
 
         self.initialize(0)
 
     def run( self ):
+        self.stopped = False
         while not self.stopped:
             time.sleep(1)
             if self.asc is True:
@@ -533,18 +535,36 @@ class Timer( QThread ):
                     self.emit( SIGNAL( 'SessionStop' ) )
             self.update_timer_display( self.currsecond )
 
-    def stop(self):
+    def stop( self ):
         self.stopped = True
 
     def initialize( self, nbseconds ):
         self.currsecond = nbseconds
+        self.initseconds = nbseconds
         self.update_timer_display( nbseconds )
         if nbseconds > 0:
             self.asc = False
+        else:
+            self.asc = True
+
+    def convertInMinutes( self, nbseconds ):
+        minutes = nbseconds / 60
+        seconds = nbseconds - minutes * 60
+        return minutes, seconds
 
     def update_timer_display( self, nbseconds ):
-        minutes = nbseconds/60
-        seconds = nbseconds-minutes*60
+        minutes, seconds = self.convertInMinutes( nbseconds )
         timer_string = "%02d:%02d" % ( minutes, seconds )
-        self.timer.setText(timer_string)
+        self.timer.setText( timer_string )
+
+    def getRunningTime( self ):
+        """ Return the duration of the session.
+        """
+        if self.asc is False:
+            totalsecs = self.initseconds - self.currsecond
+        else:
+            totalsecs = self.currsecond
+
+        minutes, seconds = self.convertInMinutes( totalsecs )
+        return  minutes, seconds
             
