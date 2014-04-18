@@ -1,6 +1,9 @@
 import numpy as np
 import lomb
 import time
+from scipy.sparse import spdiags, eye
+from scipy.signal import welch
+from numpy.linalg import inv
 import MySQLdb as mdb
 
 STORE_ALL_ELEMENTS = True
@@ -35,6 +38,8 @@ class TimeSeries():
         self.series = np.array([])
         self.smpltime = np.array([])
         self.realtime = np.array([])
+        self.psd_mag = np.array([])
+        self.psd_freq = np.array([])
         self.start_time = 0
         self.cumultime = 0
         self.idx_start = 0
@@ -54,6 +59,40 @@ class TimeSeries():
         self.idx_start = np.where( self.smpltime > self.smpltime[-1]-window_size*1000 )[0][0]
         return self.idx_start
 
+    def compute_SDNN( self ):
+        if len(self.series) > 2:
+            return self.series[self.idx_start:-1].std(ddof=1)
+        else:
+            return 0.0
+
+    def computePSD( self ):
+        if len(self.series) > 10:
+
+            fx, fy, nout, jmax, prob = lomb.fasper( self.smpltime[self.idx_start:-1]/1000,
+                                                   self.series[self.idx_start:-1]/1000,
+                                                   4., 2.)
+            pwr = ( ( self.series[self.idx_start:-1]/1000-(self.series[self.idx_start:-1]/1000).mean())**2).sum() \
+                    /(len(self.series[self.idx_start:-1])-1)
+            fy = fy/(nout/(4.0*pwr))*1000
+            self.psd_mag = fy
+            self.psd_freq = fx
+
+            # Calculate frequencies power components VLF, LF and HF
+            self.VLFpwr = 0
+            self.LFpwr = 0
+            self.HFpwr = 0
+            for i, f in enumerate( self.psd_freq ):
+                if 0 < f <= 0.04:
+                    self.VLFpwr += self.psd_mag[i]
+                elif 0.04 < f <= 0.15:
+                    self.LFpwr += self.psd_mag[i]
+                elif 0.15 < f <= 0.4:
+                    self.HFpwr += self.psd_mag[i]
+
+            self.VLFpwr *= 1000
+            self.LFpwr *= 1000
+            self.HFpwr *= 1000
+
 
 class RRIntervals( TimeSeries ):
     def __init__( self ):
@@ -62,6 +101,55 @@ class RRIntervals( TimeSeries ):
     def add_rrinterval( self, rri_ms ):
         self.add( rri_ms, rri_ms )
 
+    def detrendRRI(self, lbda=50):
+        z = self.series
+        T = len(z)
+        lambdaa = lbda
+        I = eye(T)
+        D2 = spdiags( (np.ones((T,1), dtype=np.int)*np.array([1,-2,1])).T,np.arange(0,3),T-2,T)
+        z_stat = (I.toarray()-inv((I+lambdaa**2*D2.H*D2).toarray()))*np.asmatrix(z.reshape(T,1))
+        return z_stat
+
+    def computeLombPeriodogram( self ):
+
+        z_stat = self.detrendRRI()
+        lombx = self.smpltime[self.idx_start:-1]/1000
+        lomby = np.asarray(z_stat.H)[0][self.idx_start:-1]/1000
+
+        fx, fy, nout, jmax, prob = lomb.fasper(lombx,lomby, 4., 2.)
+        pwr = ((lomby-lomby.mean())**2).sum()/(len(lomby)-1)
+        fy_smooth = np.array([])
+        fx_smooth = np.array([])
+        maxout = int(nout/2)
+        for i in xrange(0,maxout,4):
+            fy_smooth = np.append(fy_smooth, (fy[i]+fy[i+1]+fy[i+2]+fy[i+3])/(nout/(2.0*pwr)))
+            fx_smooth = np.append(fx_smooth, fx[i])
+        fy_smooth = fy_smooth/4*1e3
+
+        # pwr = ( ( self.series[self.idx_start:-1]/1000-(self.series[self.idx_start:-1]/1000).mean())**2).sum() \
+        #         /(len(self.series[self.idx_start:-1])-1)
+        # fy = fy/(nout/(4.0*pwr))*1000
+
+        self.psd_mag = fy
+        self.psd_freq = fx
+
+        # Calculate frequencies power components VLF, LF and HF
+        self.VLFpwr = 0
+        self.LFpwr = 0
+        self.HFpwr = 0
+        for i, f in enumerate( self.psd_freq ):
+            if 0 < f <= 0.04:
+                self.VLFpwr += self.psd_mag[i]
+            elif 0.04 < f <= 0.15:
+                self.LFpwr += self.psd_mag[i]
+            elif 0.15 < f <= 0.4:
+                self.HFpwr += self.psd_mag[i]
+
+        self.VLFpwr *= 1000
+        self.LFpwr *= 1000
+        self.HFpwr *= 1000
+
+
 class BreathingWave( TimeSeries ):
     def __init__( self ):
         TimeSeries.__init__( self )
@@ -69,6 +157,11 @@ class BreathingWave( TimeSeries ):
     def add_breath( self, value ):
         # The breathing data are sampled at 18 Hz (56ms)
         self.add( value, 56 )
+
+    def computeWelchPeriodogram(self):
+        f, Pxx_den = welch(self.series[self.idx_start:-1], 18, nperseg=len(self.series[self.idx_start:-1]))
+        self.psd_mag = Pxx_den
+        self.psd_freq = f
 
 
 class RRI_BW_Data():

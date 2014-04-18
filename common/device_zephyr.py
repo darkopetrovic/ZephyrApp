@@ -4,7 +4,7 @@ from zephyr.collector import MeasurementCollector
 from zephyr.bioharness import BioHarnessSignalAnalysis, BioHarnessPacketHandler
 from zephyr.delayed_stream import DelayedRealTimeStream
 from zephyr.message import MessagePayloadParser
-from zephyr.protocol import Protocol, BioHarnessProtocol, MessageFrameParser
+from zephyr.protocol import Protocol, BioHarnessProtocol, MessageFrameParser, MessageDataLogger
 from zephyr.testing import TimedVirtualSerial, simulation_workflow
 from PyQt4.QtGui import QWidget
 from PyQt4.QtCore import QThread, SIGNAL
@@ -16,6 +16,9 @@ import logging
 
 # Set to FALSE to use the real data coming from the device
 VIRTUAL_SERIAL = True
+
+# Create test data and use it for the virtual serial (VIRTUAL_SERIAL must be False!)
+CREATE_TEST_DATA = False
 
 # A function that tries to list serial ports on most common platforms
 def list_serial_ports():
@@ -49,19 +52,26 @@ class ZephyrConnect( QThread ):
         self.SerialNumber = ''
         self.connected = False
         self.paused = False
+        self.running = False
+        self.create_test_data = False
         self.PacketType = {'BREATHING':0x15,
                            'ECG':0x16,
                            'RRDATA':0x19,
                            'ACC':0x1E}
 
         zephyr.configure_root_logger()
+        if CREATE_TEST_DATA is True and VIRTUAL_SERIAL is False:
+            self.testdata_writer = MessageDataLogger("5-minutes-zephyr-stream")
 
     def connectTo(self, comport):
         try:
             if VIRTUAL_SERIAL is True:
-                test_data_dir = "A:\\Projects\\ecgmuzbak\\sft\\py\\zephyr-bt\\test_data"
-                self.ser = TimedVirtualSerial(test_data_dir + "/120-second-bt-stream.dat",
-                                         test_data_dir + "/120-second-bt-stream-timing.csv")
+                # test_data_dir = "A:\\Projects\\ecgmuzbak\\sft\\py\\zephyr-bt\\test_data"
+                # self.ser = TimedVirtualSerial(test_data_dir + "/120-second-bt-stream.dat",
+                #                          test_data_dir + "/120-second-bt-stream-timing.csv")
+                test_data_dir = "A:\\Projects\\ecgmuzbak\\sft\\py\\ZephyrApp"
+                self.ser = TimedVirtualSerial(test_data_dir + "/5-minutes-zephyr-stream.dat",
+                                         test_data_dir + "/5-minutes-zephyr-stream-timing.csv")
                 self.connected = True
             else:
                 self.ser = serial.Serial( comport )
@@ -90,9 +100,11 @@ class ZephyrConnect( QThread ):
         # handle the frame: verify STX, DLC, CRC and execute callback with the message in parameter
         message_parser = MessageFrameParser([payload_parser.handle_message])
 
+        # The delayed stream is useful to synchronize the data coming from the device
+        # and provides an easy reading by sending tuples like (signal name, sample value)
         self.delayed_stream_thread = DelayedRealTimeStream(collector, [self.callback], 1.2)
 
-        self.protocol = BioHarnessProtocol(self.ser, [message_parser.parse_data])
+        self.protocol = BioHarnessProtocol(self.ser, [message_parser.parse_data, self.create_test_data_function])
 
         if VIRTUAL_SERIAL is False :
             self.protocol.add_initilization_message( 0x0B, []) # get Serial Number
@@ -104,11 +116,13 @@ class ZephyrConnect( QThread ):
             self.protocol.add_initilization_message(self.PacketType['ACC'], [0]) # disable accelerometer waveform
 
     def _callback_serial_test( self, message ):
-       # Message is the serial number
-       self.disconnect(self, SIGNAL( 'Message' ), self._callback_serial_test)
-       if message.Number != '':
-           self.SerialNumber = message.Number
-           self.connected = True
+        if hasattr(message, 'Number'):
+            # Message is the serial number
+            self.disconnect(self, SIGNAL( 'Message' ), self._callback_serial_test)
+            if message.Number != '':
+                self.SerialNumber = message.Number.strip()
+                self.connected = True
+                self.emit( SIGNAL( 'Message' ), "connected" )
 
     def run(self):
         self.running = True
@@ -165,4 +179,8 @@ class ZephyrConnect( QThread ):
             return True
         except:
             return False
+
+    def create_test_data_function(self, stream_data):
+        if CREATE_TEST_DATA is True  and VIRTUAL_SERIAL is False:
+            self.testdata_writer( stream_data )
 

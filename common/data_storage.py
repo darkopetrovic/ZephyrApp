@@ -7,8 +7,8 @@ class DataStorage():
         self.timeseries = timeseries
 
     def db_connect(self):
-        return mdb.connect(self.settings.db_host, self.settings.db_user,
-                          self.settings.db_pwd, self.settings.db_dbname)
+        return mdb.connect(str(self.settings.db_host), str(self.settings.db_user),
+                            str(self.settings.db_pwd), str(self.settings.db_dbname))
 
     def test_db_connection(self):
         con = None
@@ -27,13 +27,12 @@ class DataStorage():
                 con.close()
 
 
-    def store_session( self, duration ):
+    def store_session( self, sessiondata ):
 
         # store in database
         if self.settings.enable_database and self.timeseries.isNotEmpty():
             # connection
-            con = mdb.connect(str(self.settings.db_host), str(self.settings.db_user),
-                              str(self.settings.db_pwd), str(self.settings.db_dbname))
+            con = self.db_connect()
 
             rriseries_txt = bwseries_txt = ''
             if self.timeseries.ts_rri.series.size:
@@ -47,8 +46,26 @@ class DataStorage():
                     bwseries_txt += '\n'
 
             today = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            data = (today, duration, rriseries_txt, bwseries_txt)
+            data = (today, sessiondata['duration'], rriseries_txt, bwseries_txt, sessiondata['sessiontype'],
+            sessiondata['breathing_zone'], sessiondata['note'])
             with con:
                 cur = con.cursor()
-                cur.execute("INSERT INTO records(datetime, duration, rrintervals, breathingwave) "
-                            "VALUE(%s, %s, %s, %s)", data)
+                cur.execute("INSERT INTO records_record(create_datetime, duration, rrintervals, breathingwave, "
+                            "session_type, breathing_zone, note) "
+                            "VALUE(%s, %s, %s, %s, %s, %s, %s)", data)
+
+    def get_session_types(self):
+        con = self.db_connect()
+        with con:
+            cur = con.cursor()
+            cur.execute("SELECT * FROM session_type")
+            types = cur.fetchall()
+            return types
+
+    def get_breathing_zones(self):
+        con = self.db_connect()
+        with con:
+            cur = con.cursor()
+            cur.execute("SELECT * FROM breathing_zone")
+            rows = cur.fetchall()
+            return rows

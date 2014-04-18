@@ -1,31 +1,37 @@
-import sys, os, platform
+import platform
 import datetime
 import time
+import numpy as np
 
 from guidata.qt.QtGui import (QWidget, QMainWindow, QVBoxLayout, qApp, QTextEdit,
                                QFont, QColor, QLabel, QAction, QIcon, QHBoxLayout,
                                QLineEdit, QSizePolicy, QMessageBox, QPushButton,
+                               QDialog, QDialogButtonBox, QGridLayout, QGroupBox,
+                               QRadioButton, QComboBox
                             )
 from guidata.qtwidgets import DockableWidget
-from guidata.qt.QtCore import (Qt, QThread, QSettings, QTimer, SIGNAL, QT_VERSION_STR, PYQT_VERSION_STR)
+from guidata.qt.QtCore import (Qt, QThread, QSettings, QTimer, QSize, SIGNAL, QT_VERSION_STR, PYQT_VERSION_STR)
 from guidata.configtools import get_icon
 from guidata.qthelpers import create_action, add_actions, get_std_icon
 from guidata.dataset.datatypes import (DataSet, BeginGroup, EndGroup, ValueProp)
 from guidata.dataset.dataitems import (ChoiceItem, MultipleChoiceItem, BoolItem, StringItem, DirectoryItem)
 from guidata.dataset.qtwidgets import DataSetShowGroupBox, DataSetEditGroupBox
-from guiqwt.plot import CurveWidget, CurvePlot
+from guiqwt.plot import CurveWidget, CurvePlot, CurveDialog
+from guiqwt.shapes import RectangleShape
+from guiqwt.styles import ShapeParam
 from guiqwt.builder import make
 from guiqwt.config import _
-from PyQt4.Qwt5.Qwt import QwtPlot, QwtScaleDraw, QwtText
+from PyQt4.Qwt5 import (QwtPlot, QwtScaleDraw, QwtText)
 
 # From own files:
 #sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir)))
-from common.hrv import RRIntervals, BreathingWave, TimeSeriesContainer
+from common.hrv import TimeSeriesContainer
 from common.device_zephyr import ZephyrConnect, VIRTUAL_SERIAL, list_serial_ports
 from common.data_storage import DataStorage
-import zephyr
+import zephyr.message
 #from noise import MakeNoise
-  
+
+
 APP_NAME = _("Zephyr Biofeedback")
 VERSION = '1.0.0'
 
@@ -34,9 +40,7 @@ DataStorage_database    = ValueProp(False)
 DataStorage_files       = ValueProp(False)
 
 class AppSettings( DataSet ):
-
     comports = list_serial_ports()
-
     ports = []
     for p in comports:
         ports.append((p, 'COM%d' % (p+1)) )
@@ -44,7 +48,7 @@ class AppSettings( DataSet ):
     comport = ChoiceItem("COM Port", ports)
     bh_packets = MultipleChoiceItem("Enable BioHarness Packets",
                                   ["RR Data", "Breathing", "ECG (not implemented yet)",
-                                   "Accelerometer (not implemented yet)"], \
+                                   "Accelerometer (not implemented yet)"],
                                        [0,1]).vertical(1).set_pos(col=0)
     timedsession = ChoiceItem("Timed Session",
                               [(5, "5 minutes"), (10, "10 minutes"),
@@ -75,83 +79,19 @@ class MainWindow( QMainWindow ):
         QMainWindow.__init__(self)
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(get_icon('python.png'))
-
-        self.appsettings = DataSetShowGroupBox("Settings",
-                                             AppSettings, comment='', 
-                                             title=_("Application settings"))
-
-        self.settings_storage = QSettings('settings.ini', QSettings.IniFormat)
-
-        # load settings:
-        self.settings_storage.beginGroup('BioHarnessPackets')
-        rrdata = self.settings_storage.value('rrdata', True).toBool()
-        breathing = self.settings_storage.value('breathing', True).toBool()
-        ecg = self.settings_storage.value('ecg', False).toBool()
-        accelerometer = self.settings_storage.value('accelerometer', False).toBool()
-        self.settings_storage.endGroup()
-        self.appsettings.dataset.bh_packets = []
-        if rrdata: self.appsettings.dataset.bh_packets.append(0)
-        if breathing: self.appsettings.dataset.bh_packets.append(1)
-        if ecg: self.appsettings.dataset.bh_packets.append(2)
-        if accelerometer: self.appsettings.dataset.bh_packets.append(3)
-
-        self.settings_storage.beginGroup('Misc')
-        self.appsettings.dataset.timedsession = self.settings_storage.value('TimedDuration', 5).toInt()[0]
-        self.appsettings.dataset.comport = self.settings_storage.value('COM_Port').toInt()[0]
-        self.settings_storage.endGroup()
-
-        self.settings_storage.beginGroup('Storage')
-        self.appsettings.dataset.enable_database = self.settings_storage.value('db_enable', False).toBool()
-        self.appsettings.dataset.db_host = self.settings_storage.value('db_host').toString()
-        self.appsettings.dataset.db_user = self.settings_storage.value('db_user').toString()
-        self.appsettings.dataset.db_pwd = self.settings_storage.value('db_pwd').toString()
-        self.appsettings.dataset.db_dbname = self.settings_storage.value('db_dbname').toString()
-        self.appsettings.dataset.enable_files = self.settings_storage.value('files_enable', False).toBool()
-        self.appsettings.dataset.directory_storage = self.settings_storage.value('directory').toString()
-        self.settings_storage.endGroup()
+        self.timeout = None
 
         # Welcome message in statusbar:
         status = self.statusBar()
         status.showMessage(_("Zephyr BioHarness 3.0"), 5000)
 
-        # Layout Setup --------------------------------------------------------------------------------------------
-        # ---------------------------------------------------------------------------------------------------------
+        self._setup_layout()
+        self._setup_menu()
+        self._load_settings()
+        self._init_objects()
+        self.show()
 
-        # Allow dockable widgets to be side by side
-        self.setDockOptions(QMainWindow.AnimatedDocks | QMainWindow.AllowNestedDocks)  
-        self.setGeometry(300,100,1000,900)
-
-        self.rrplot         = RealTimePlot( self, 'RR-Interval [ms]', QColor( 255, 0, 0 ) )
-        self.bwplot         = RealTimePlot( self, 'Breathing', QColor( 0, 0, 255 ) )
-        self.logarea        = DockablePlotWidget(self, QTextEdit)
-        self.infobox        = DockablePlotWidget(self, QWidget)
-
-        self.logarea.widget.setReadOnly( True )
-        self.logarea.widget.setFont( QFont("Courier", 8) )
-        self.logarea.widget.setMinimumHeight(200)
-        self.logarea.widget.setMinimumWidth(500)
-        self.infobox.widget.setMinimumHeight(200)
-        self.infobox.widget.setMinimumWidth(200)
-    
-        self.lbl_sdnn = QLabel( self.infobox.widget )
-        self.lbl_sdnn.setText("SDNN: %3.1f ms    " % 0.0)
-        self.lbl_sdnn.move(20, 40)
-        self.lbl_sdnn.setFont(QFont("Arial", 20))
-        self.bhcmdinput = QLineEdit( self.infobox.widget )
-        self.bhcmdinput.move(20,80)
-        self.bhcmdbutton = QPushButton('Send', self.infobox.widget )
-        self.bhcmdbutton.move(20,100)
-        self.infobox.widget.connect(self.bhcmdbutton, SIGNAL("clicked()"), self.sendbhcmd)
-        #self.bhcmdbutton.clicket.connect( self.sendbhcmd )
-
-        # Add the DockWidget to the main window
-        self.rrcurve_dock = self.add_dockwidget( self.rrplot.curvewidget, _("RR-Intervals Plot"),
-                                                 Qt.Vertical, position=Qt.TopDockWidgetArea )
-        self.bwcurve_dock = self.add_dockwidget( self.bwplot.curvewidget, _("Breathing Plot"),
-                                                 Qt.Vertical, position=Qt.TopDockWidgetArea )
-        self.log_dock = self.add_dockwidget( self.logarea, _("Messages"), Qt.Horizontal, Qt.RightDockWidgetArea)
-        self.info_dock = self.add_dockwidget( self.infobox, _("Infobox"), Qt.Horizontal, Qt.LeftDockWidgetArea )        
-
+    def _setup_menu(self):
         # File menu
         file_menu = self.menuBar().addMenu(_("File"))
         settings_action = create_action(self, _("Settings"),
@@ -192,18 +132,108 @@ class MainWindow( QMainWindow ):
         self.toolbar.addAction( self.playAction )
         self.toolbar.addAction( self.stopAction )
         self.toolbar.addAction( self.timedAction )
+        self.toolbar.setObjectName('Controls')
 
         # Time toolbar
         self.timer = Timer( self )
         self.connect( self.timer, SIGNAL( 'SessionStop' ), self.session_stop )
- 
-        self.show()
-        # After this call the widget will be visually in front of any 
-        # overlapping sibling widgets.
-        self.rrcurve_dock.raise_()
 
-        # Objects setup -------------------------------------------------------------------------------------------
-        # ---------------------------------------------------------------------------------------------------------
+    def _setup_layout(self):
+        # Allow dockable widgets to be side by side
+        self.setDockOptions(QMainWindow.AnimatedDocks | QMainWindow.AllowNestedDocks)
+        self.setGeometry(300,100,1500,900)
+
+        self.rrplot         = RealTimePlot( self, 'RR-Interval', 'ms', QColor( 255, 0, 0 ) )
+        self.bwplot         = RealTimePlot( self, 'Breathing','', QColor( 0, 0, 255 ) )
+        self.logarea        = myDockableWidget(self, QTextEdit)
+        self.infobox        = myDockableWidget(self, QWidget)
+        self.bwpsd          = RealTimePSD( self, 'Breathing PSD', inity=25000 )
+        self.rrpsd          = RealTimePSD( self, 'RR-Interval PSD')
+
+        self.logarea.widget.setReadOnly( True )
+        self.logarea.widget.setFont( QFont("Courier", 8) )
+        self.logarea.widget.setMinimumHeight(150)
+
+        # self.rrpsd.plot.set_axis_limits(QwtPlot.yLeft,0,1)
+
+        self.lbl_sdnn = QLabel( self.infobox.widget )
+        self.lbl_sdnn.setText("SDNN: %3.1f ms    " % 0.0)
+        self.lbl_sdnn.move(20, 40)
+        self.lbl_sdnn.setFont(QFont("Arial", 20))
+        self.bhcmdinput = QLineEdit( self.infobox.widget )
+        self.bhcmdinput.move(20,80)
+        self.bhcmdbutton = QPushButton('Send', self.infobox.widget )
+        self.bhcmdbutton.move(20,100)
+        self.infobox.widget.connect(self.bhcmdbutton, SIGNAL("clicked()"), self.sendbhcmd)
+        #self.bhcmdbutton.clicket.connect( self.sendbhcmd )
+
+        # Add the DockWidget to the main window
+        self.info_dock = self.add_dockwidget( self.infobox, _("Infobox") , position=Qt.LeftDockWidgetArea)
+        self.rrcurve_dock = self.add_dockwidget( self.rrplot.dockwidget, _("RR-Intervals Plot") )
+        self.rrpsd_dock = self.add_dockwidget( self.rrpsd.dockwidget, _("RRI PSD"))
+        self.bwcurve_dock = self.add_dockwidget( self.bwplot.dockwidget, _("Breathing Plot") )
+        self.bwpsd_dock = self.add_dockwidget( self.bwpsd.dockwidget, _("Breathing PSD") )
+        self.splitDockWidget(self.rrcurve_dock, self.rrpsd_dock, Qt.Horizontal)
+        self.splitDockWidget(self.bwcurve_dock, self.bwpsd_dock, Qt.Horizontal)
+        self.log_dock = self.add_dockwidget( self.logarea, _("Messages"),  position=Qt.BottomDockWidgetArea)
+
+        # setting the name of the dock widget is required to save correclty
+        # the postion of the widget when the application close
+        self.info_dock.setObjectName('info_dock')
+        self.rrcurve_dock.setObjectName('rrcurve_dock')
+        self.rrpsd_dock.setObjectName('rrpsd_dock')
+        self.bwcurve_dock.setObjectName('bwcurve_dock')
+        self.bwpsd_dock.setObjectName('bwpsd_dock')
+        self.log_dock.setObjectName('log_dock')
+
+        self.log_dock.setMinimumHeight( 100 )
+        self.log_dock.setMaximumHeight( 300 )
+        self.info_dock.setFixedWidth( 220 )
+
+        self.rrcurve_dock.setMinimumSize( 400, 200 )
+        self.bwcurve_dock.setMinimumSize( 400, 200 )
+        self.rrpsd_dock.setMinimumSize( 400, 200 )
+        self.bwpsd_dock.setMinimumSize( 400, 200 )
+
+    def _load_settings(self):
+        self.appsettings = DataSetShowGroupBox("Settings",
+                                             AppSettings, comment='',
+                                             title=_("Application settings"))
+
+        self.settings_storage = QSettings('settings.ini', QSettings.IniFormat)
+
+        self.restoreGeometry( self.settings_storage.value('docksGeometry').toByteArray() )
+        self.restoreState( self.settings_storage.value('docksState').toByteArray() )
+
+        # load settings:
+        self.settings_storage.beginGroup('BioHarnessPackets')
+        rrdata = self.settings_storage.value('rrdata', True).toBool()
+        breathing = self.settings_storage.value('breathing', True).toBool()
+        ecg = self.settings_storage.value('ecg', False).toBool()
+        accelerometer = self.settings_storage.value('accelerometer', False).toBool()
+        self.settings_storage.endGroup()
+        self.appsettings.dataset.bh_packets = []
+        if rrdata: self.appsettings.dataset.bh_packets.append(0)
+        if breathing: self.appsettings.dataset.bh_packets.append(1)
+        if ecg: self.appsettings.dataset.bh_packets.append(2)
+        if accelerometer: self.appsettings.dataset.bh_packets.append(3)
+
+        self.settings_storage.beginGroup('Misc')
+        self.appsettings.dataset.timedsession = self.settings_storage.value('TimedDuration', 5).toInt()[0]
+        self.appsettings.dataset.comport = self.settings_storage.value('COM_Port').toInt()[0]
+        self.settings_storage.endGroup()
+
+        self.settings_storage.beginGroup('Storage')
+        self.appsettings.dataset.enable_database = self.settings_storage.value('db_enable', False).toBool()
+        self.appsettings.dataset.db_host = self.settings_storage.value('db_host').toString()
+        self.appsettings.dataset.db_user = self.settings_storage.value('db_user').toString()
+        self.appsettings.dataset.db_pwd = self.settings_storage.value('db_pwd').toString()
+        self.appsettings.dataset.db_dbname = self.settings_storage.value('db_dbname').toString()
+        self.appsettings.dataset.enable_files = self.settings_storage.value('files_enable', False).toBool()
+        self.appsettings.dataset.directory_storage = self.settings_storage.value('directory').toString()
+        self.settings_storage.endGroup()
+
+    def _init_objects(self):
         # self.timeseriescontainer.ts_rri = RRIntervals()
         # self.timeseriescontainer.ts_bw = BreathingWave()
         self.timeseriescontainer = TimeSeriesContainer()
@@ -224,10 +254,11 @@ class MainWindow( QMainWindow ):
         # and the container where time series are stored
         self.datastorage = DataStorage( self.appsettings.dataset, self.timeseriescontainer )
 
+        # self.psdplot = PSDThread()
+
     def sendbhcmd( self ):
         cmd =  int(str(self.bhcmdinput.text()), 16)
         self.zephyr_connect.sendmessage(cmd, [])
-
 
     #------?
     def about( self ):
@@ -282,11 +313,11 @@ class MainWindow( QMainWindow ):
                 self.logmessage("Connection to the database '%s established'." % message)
             else:
                 self.logmessage("Connection to the database failed: %s" % message, 'error')
-        
- 
+
+
     #------GUI refresh/setup
-    def add_dockwidget(self, child, title, orientation = Qt.Vertical, position=None ):
-        """Add QDockWidget and toggleViewAction"""
+    def add_dockwidget( self, child, title, orientation = Qt.Vertical, position=None ):
+        """Add a QDockWidget to the main window."""
         dockwidget, location = child.create_dockwidget( title )
         if position is not None:
             location = position
@@ -313,9 +344,21 @@ class MainWindow( QMainWindow ):
         self.rrplot.startIdx = self.timeseriescontainer.ts_rri.getSampleIndex( self.rrplot.window_length )
         self.rrplot.update( self.timeseriescontainer.ts_rri.realtime, self.timeseriescontainer.ts_rri.series )
 
-        #self.logmessage( "Incoming RRI: %i ms" % value )
-        #sdnn = float("%3.1f" % self.timeseriescontainer.ts_rri.compute_SDNN())
-        #self.lbl_sdnn.setText( "SDNN: %3.1f ms" % sdnn )
+        if len(self.timeseriescontainer.ts_rri.series) > 10:
+            self.timeseriescontainer.ts_rri.computeLombPeriodogram()
+            # if self.psdplot.running is False:
+            #         self.psdplot.plot = self.rrpsd
+            #         self.psdplot.ts_rri = self.timeseriescontainer.ts_rri
+            #         self.psdplot.start()
+            # if len(self.timeseriescontainer.ts_rri.series) > 11:
+            #     self.psdplot.calculate_intermediate()
+
+            self.rrpsd.update(self.timeseriescontainer.ts_rri.psd_freq, self.timeseriescontainer.ts_rri.psd_mag)
+            # self.logmessage( "PSD nb smpl: %i, SERIES nb smpl %i " %
+            #                  (len(self.timeseriescontainer.ts_rri.psd_freq), len(self.timeseriescontainer.ts_rri.series[self.rrplot.startIdx:-1])) )
+                #sdnn = float("%3.1f" % self.timeseriescontainer.ts_rri.compute_SDNN())
+                #self.lbl_sdnn.setText( "SDNN: %3.1f ms" % sdnn )
+
 
     def update_BW_plot( self, value ):
         # Store value in the data-set. We store every value in the dataset
@@ -325,14 +368,17 @@ class MainWindow( QMainWindow ):
         self.bwplot.startIdx = self.timeseriescontainer.ts_bw.getSampleIndex( self.bwplot.window_length )
         self.bwplot.update( self.timeseriescontainer.ts_bw.realtime, self.timeseriescontainer.ts_bw.series )
 
+        if len(self.timeseriescontainer.ts_bw.series) > 10:
+            self.timeseriescontainer.ts_bw.computeWelchPeriodogram()
+            self.bwpsd.update(self.timeseriescontainer.ts_bw.psd_freq, self.timeseriescontainer.ts_bw.psd_mag)
+
     def printmessage( self, message ):
-        if isinstance(message, zephyr.message.SerialNumber):
-            if self.zephyr_connect.connected is False:
-                self.logmessage("Successfully connected to the device %s." % message.Number.strip() )
-                self._toggle_connect_button()
-                if self.timeout:
-                    self.timeout.stop()
-                    del self.timeout
+        if message == 'connected':
+            self.logmessage("Successfully connected to the device %s." % self.zephyr_connect.SerialNumber )
+            self._toggle_connect_button()
+            if self.timeout:
+                self.timeout.stop()
+                del self.timeout
 
         if isinstance(message, zephyr.message.BatteryStatus):
             self.logmessage("Battery charge is %d%%" % message.Charge )
@@ -399,7 +445,7 @@ class MainWindow( QMainWindow ):
         sel = 0
         if self.sessiontype == 'timed':
             sel = QMessageBox.warning( self, "Timed Session",
-                                       "A Timed Session is currently active!\nIf you stop the session " \
+                                       "A Timed Session is currently active!\nIf you stop the session "
                                        "the session will be stored as a free session.", "OK", "Cancel")
         if sel == 0:
             self.session_stop()
@@ -442,18 +488,70 @@ class MainWindow( QMainWindow ):
 
         # store the current session?
         if self.appsettings.dataset.enable_database or self.appsettings.dataset.enable_files:
-            sel = QMessageBox.question(self, "Save Session", "Store the current session?", "Yes", "No")
-            if sel == 0:
-                minutes,seconds = self.timer.getRunningTime()
-                duration = str(minutes) + ":" + str(seconds)
-                self.datastorage.store_session( duration )
-                self.logmessage("Session stored in database.")
+            self.infosdialog = SessionInfos( self, self.datastorage )
+            self.connect(self.infosdialog, SIGNAL('accepted()'), self.session_store )
+            self.infosdialog.exec_()
+
+            # sel = QMessageBox.question(self, "Save Session", "Store the current session?", "Yes", "No")
+            # if sel == 0:
+            #
+            #
 
 
-class DockablePlotWidget( DockableWidget ):
+    def session_store(self):
+        minutes,seconds = self.timer.getRunningTime()
+        duration = str(minutes) + ":" + str(seconds)
+
+        for i, r in enumerate(self.infosdialog.sessiontypes):
+            if r.isChecked():
+                sessiontype = i+1
+
+        sessiondict = { 'duration':duration,
+                        'sessiontype':sessiontype,
+                        'breathing_zone': self.infosdialog.breathzone.currentIndex()+1,
+                        'note': str(self.infosdialog.note.toPlainText())
+        }
+
+        self.datastorage.store_session( sessiondict )
+        self.logmessage("Session stored in database.")
+
+    def closeEvent(self, event):
+        self.settings_storage.setValue( 'docksGeometry', self.saveGeometry() )
+        self.settings_storage.setValue( 'docksState', self.saveState() )
+        QMainWindow.closeEvent(self, event)
+
+class PSDThread(QThread):
+    def __init__(self):
+        QThread.__init__(self)
+        self.running=False
+        self.plot=None
+        self.ts_rri = None
+        self.godisplay = False
+        self.old_psd_freq = np.array([])
+        self.old_psd_mag = np.array([])
+    def run(self):
+        self.old_psd_mag = self.ts_rri.psd_mag
+        self.running=True
+        while self.running is True:
+            if self.godisplay is True:
+                for i in xrange(0,5):
+                    self.plot.update(self.ts_rri.psd_freq, self.intermediate[i])
+                    time.sleep(0.2)
+                self.godisplay = False
+
+    def calculate_intermediate(self):
+        self.intermediate = []
+        remaining=len(self.ts_rri.psd_mag)-len(self.old_psd_mag)
+        for i, f in enumerate(self.old_psd_mag):
+            self.intermediate.append( np.linspace(self.old_psd_mag[i], self.ts_rri.psd_mag[i], 5) )
+        for x in range(remaining):
+            self.intermediate.append(self.ts_rri.psd_mag[i+1+x])
+        self.godisplay = True
+
+class myDockableWidget( DockableWidget ):
     LOCATION = Qt.RightDockWidgetArea
     def __init__(self, parent, widgetclass, toolbar = None):
-        super(DockablePlotWidget, self).__init__(parent)
+        super(myDockableWidget, self).__init__(parent)
         self.toolbar = toolbar
         layout = QVBoxLayout()
         self.widget = widgetclass()
@@ -461,29 +559,119 @@ class DockablePlotWidget( DockableWidget ):
         self.setLayout(layout)
 
     def get_plot(self):
-        return self.widget.plot
+        return self.widget.get_plot()
+
+    def sizeHint(self):
+        return QSize(500, 300)
 
 class RealTimePlot():
     """ Real time Qwt plot object. 
     """
-    def __init__(self, parent, ytitle="Y", color=QColor( 255, 0, 0 )):
+    def __init__(self, parent, ytitle="Y", yunit='', color=QColor( 255, 0, 0 )):
         self.curve = make.curve( [ ], [ ], '(Curve Name)', color )
-        self.curvewidget    = DockablePlotWidget(parent, CurveWidget)
-        self.curvewidget.widget.plot.add_item( self.curve )
-        self.curvewidget.widget.plot.set_antialiasing( True )
-        self.curvewidget.widget.plot.setAxisTitle( QwtPlot.xBottom, 'Time [s]' )
-        self.curvewidget.widget.plot.setAxisTitle( QwtPlot.yLeft, ytitle )
-        self.curvewidget.widget.plot.setAxisScaleDraw( QwtPlot.xBottom, DateTimeScaleDraw() )
+        self.dockwidget    = myDockableWidget(parent, CurveWidget, toolbar=True )
+        # widget class: CurveWidget
+        # plot class: CurvePlot
+        self.plot = self.dockwidget.widget.plot
+        self.plot.add_item( self.curve )
+        self.plot.set_antialiasing( True )
+        self.plot.set_axis_title( QwtPlot.xBottom, 'Time' )
+        self.plot.set_axis_unit( QwtPlot.xBottom, 's' )
+        self.plot.set_axis_title( QwtPlot.yLeft, ytitle )
+        self.plot.set_axis_unit( QwtPlot.yLeft, yunit )
+        self.plot.setAxisScaleDraw( QwtPlot.xBottom, DateTimeScaleDraw() )
+        #self.toolbar = QToolBar(_("Tools"))
+        #self.curvewidget.widget.add_toolbar(self.toolbar, "default")
+        #self.curvewidget.widget.register_tools()
         self.startIdx = 0
-        self.window_length = 20 # seconds
+        self.window_length = 60 # seconds
 
     def set_data( self, x, y ):
         self.curve.set_data( x, y )
 
     def update( self, x, y ):
         self.curve.set_data( x[self.startIdx:-1], y[self.startIdx:-1] )
-        self.curvewidget.widget.plot.do_autoscale()
-        self.curvewidget.widget.plot.replot()
+        self.plot.do_autoscale()
+        #self.plot.replot()
+
+
+
+
+class RealTimePSD():
+    """ Real time Qwt plot object.
+    """
+    def __init__(self, parent, ytitle="Y", inity=1000):
+        # self.curve_vlf = make.curve( [ ], [ ], '(Curve Name)', QColor( 255, 0, 0 ), shade=0.5 )
+        # self.curve_lf = make.curve( [ ], [ ], '(Curve Name)', QColor( 0, 255, 0 ), shade=0.5 )
+        # self.curve_hf = make.curve( [ ], [ ], '(Curve Name)', QColor( 0, 0, 255 ), shade=0.5 )
+        self.psdcurve = make.curve( [ ], [ ], '(Curve Name)', QColor( 160, 160, 160 ), shade=0.2 )
+
+        def buildrect(x1, x2, filler):
+            rect = RectangleShape(x1, 0., x2, inity)
+            rect.brush.setStyle( Qt.SolidPattern )
+            rect.brush.setColor( filler )
+            rect.pen.setStyle( Qt.NoPen )
+            return rect
+
+        self.dockwidget    = myDockableWidget(parent, CurveWidget, toolbar=True )
+        # self.plot = self.curvewidget.get_plot()
+        self.plot = self.dockwidget.widget.plot
+        # self.plot.add_item( self.curve_vlf )
+        # self.plot.add_item( self.curve_lf )
+        # self.plot.add_item( self.curve_hf )
+        alpha = 100
+        self.plot.add_item( buildrect(0.,0.04, QColor(255,178,178,alpha)) )
+        self.plot.add_item( buildrect(0.04,0.15, QColor(178,178,255,alpha)) )
+        self.plot.add_item( buildrect(0.15,0.5, QColor(255,255,178,alpha)) )
+        self.plot.add_item( self.psdcurve )
+
+        self.plot.set_antialiasing( True )
+        self.plot.set_axis_title( QwtPlot.xBottom, 'Frequency' )
+        self.plot.set_axis_unit( QwtPlot.xBottom, 'Hz' )
+        self.plot.set_axis_title( QwtPlot.yLeft, ytitle )
+        self.plot.set_axis_unit( QwtPlot.yLeft, 's^2/Hz' )
+
+        #self.plot.setAxisScale(QwtPlot.xBottom, 0, 0.5)
+        self.plot.set_axis_limits( QwtPlot.xBottom, 0, 0.5 )
+        self.plot.set_axis_limits( QwtPlot.yLeft, 0, inity )
+
+    def set_data( self, x, y ):
+        self.psdcurve.set_data( x, y )
+
+    def update( self, x, y ):
+
+
+        # vlf_idx_min = 0
+        # lf_idx_min = np.where(x >= 0.04)[0][0]
+        # hf_idx_min = np.where(x >= 0.15)[0][0]
+
+
+        # for i, f in enumerate( x ):
+        #     if 0 < f <= 0.04:
+        #
+        #         self.VLFpwr += self.psd_mag[i]
+        #     elif 0.04 > f <= 0.15:
+        #         self.LFpwr += self.psd_mag[i]
+        #     elif 0.15 > f <= 0.4:
+        #         self.HFpwr += self.psd_mag[i]
+
+
+        # self.curve_vlf.set_data( x[vlf_idx_min], y[lf_idx_min-1] )
+        # self.curve_lf.set_data( x[lf_idx_min], y[hf_idx_min-1] )
+        # self.curve_hf.set_data( x[hf_idx_min], y[-1] )
+
+        # self.curve_vlf.set_data( x[vlf_idx_min:lf_idx_min+1], y[vlf_idx_min:lf_idx_min+1] )
+        # self.curve_lf.set_data( x[lf_idx_min:hf_idx_min+1], y[lf_idx_min:hf_idx_min+1] )
+        # self.curve_hf.set_data( x[hf_idx_min:-1], y[hf_idx_min:-1] )
+
+        self.psdcurve.set_data( x, y )
+
+
+        #self.plot.do_autoscale()
+        self.plot.replot()
+
+    def sizeHint(self):
+        return QSize(500, 300)
 
 class DateTimeScaleDraw( QwtScaleDraw ):
     """Class used to draw a datetime axis on the plot.
@@ -491,7 +679,7 @@ class DateTimeScaleDraw( QwtScaleDraw ):
     def __init__( self, *args ):
         QwtScaleDraw.__init__( self, *args )
 
-    def label( self, value ):
+    def label(self, value ):
         """ Function used to create the text of each label
         used to draw the axis.
         """
@@ -504,9 +692,11 @@ class Timer( QThread ):
         self.currsecond = 0
         self.asc = True
         self.initseconds = 0
+        self.stopped = True
 
         self.toolbar_time = parent.addToolBar( 'Time' )
         self.toolbar_time.setMovable( False )
+        self.toolbar_time.setObjectName('Time')
         self.timer = QLineEdit()
         self.timer.setStyleSheet("QLineEdit { font-size: 19px; font-family: Courier New; \
                                 border-style: outset; border-radius: 10px; \
@@ -547,13 +737,14 @@ class Timer( QThread ):
         else:
             self.asc = True
 
-    def convertInMinutes( self, nbseconds ):
+    @staticmethod
+    def _convertInMinutes( nbseconds ):
         minutes = nbseconds / 60
         seconds = nbseconds - minutes * 60
         return minutes, seconds
 
     def update_timer_display( self, nbseconds ):
-        minutes, seconds = self.convertInMinutes( nbseconds )
+        minutes, seconds = self._convertInMinutes( nbseconds )
         timer_string = "%02d:%02d" % ( minutes, seconds )
         self.timer.setText( timer_string )
 
@@ -565,6 +756,59 @@ class Timer( QThread ):
         else:
             totalsecs = self.currsecond
 
-        minutes, seconds = self.convertInMinutes( totalsecs )
+        minutes, seconds = self._convertInMinutes( totalsecs )
         return  minutes, seconds
-            
+
+class SessionInfos( QDialog ):
+    def __init__(self, parent, appdata):
+        super(SessionInfos, self).__init__(parent)
+        self.appdata = appdata
+        self.setWindowTitle( 'Information for the session' )
+        self.setFixedSize(250, 300)
+
+        self.buttonBox = QDialogButtonBox( self )
+        self.buttonBox.setOrientation( Qt.Horizontal )
+        self.buttonBox.setStandardButtons( QDialogButtonBox.Cancel|QDialogButtonBox.Ok )
+
+        labelcombo = QLabel( 'Breathing Zone:' )
+        self.breathzone = QComboBox()
+        zones = self.appdata.get_breathing_zones()
+        for z in zones:
+            self.breathzone.addItem( z[1], z[0] )
+
+        self.breathzone.move(10, 10)
+
+        labelnote = QLabel( 'Note:' )
+        self.note = QTextEdit()
+
+        layout = QVBoxLayout()
+        layout.addWidget( self.create_SessionType_Group() )
+        layout.addWidget( labelcombo )
+        layout.addWidget( self.breathzone )
+        layout.addWidget( labelnote )
+        layout.addWidget( self.note )
+        layout.addWidget( self.buttonBox )
+
+        self.setLayout( layout )
+
+        self.buttonBox.accepted.connect( self.accept )
+        self.buttonBox.rejected.connect( self.reject )
+
+    # def accept(self):
+    #     print "voila"
+    #
+    # def reject(self):
+    #     pass
+
+    def create_SessionType_Group( self ):
+        groupBox = QGroupBox(' Session Type' )
+        vbox = QVBoxLayout()
+        self.sessiontypes = []
+        types = self.appdata.get_session_types()
+        for t in types:
+            self.sessiontypes.append( QRadioButton( t[1] ) )
+            vbox.addWidget( self.sessiontypes[-1] )
+        self.sessiontypes[0].setChecked(True)
+        vbox.addStretch(1)
+        groupBox.setLayout(vbox)
+        return groupBox
