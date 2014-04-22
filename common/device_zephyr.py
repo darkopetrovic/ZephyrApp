@@ -69,7 +69,7 @@ class ZephyrConnect( QThread ):
                 # test_data_dir = "A:\\Projects\\ecgmuzbak\\sft\\py\\zephyr-bt\\test_data"
                 # self.ser = TimedVirtualSerial(test_data_dir + "/120-second-bt-stream.dat",
                 #                          test_data_dir + "/120-second-bt-stream-timing.csv")
-                test_data_dir = "A:\\Projects\\ecgmuzbak\\sft\\py\\ZephyrApp"
+                test_data_dir = "./"
                 self.ser = TimedVirtualSerial(test_data_dir + "/5-minutes-zephyr-stream.dat",
                                          test_data_dir + "/5-minutes-zephyr-stream-timing.csv")
                 self.connected = True
