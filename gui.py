@@ -40,12 +40,19 @@ DataStorage_database    = ValueProp(False)
 DataStorage_files       = ValueProp(False)
 
 class AppSettings( DataSet ):
-    comports = list_serial_ports()
+    serialports = list_serial_ports()
     ports = []
-    for p in comports:
-        ports.append((p, 'COM%d' % (p+1)) )
+    for s in serialports:
+        # windows port is only a number
+        if isinstance(s,int):
+            port = s
+            label = 'COM%d' % (port+1)
+        else:
+            port = label = s
+        ports.append( (port, '%s' % label) )
 
-    comport = ChoiceItem("COM Port", ports)
+    # must be a tuble like (0,'COM1') for windows
+    serialport = ChoiceItem("Serial Port", ports)
     bh_packets = MultipleChoiceItem("Enable BioHarness Packets",
                                   ["RR Data", "Breathing", "ECG (not implemented yet)",
                                    "Accelerometer (not implemented yet)"],
@@ -220,7 +227,7 @@ class MainWindow( QMainWindow ):
 
         self.settings_storage.beginGroup('Misc')
         self.appsettings.dataset.timedsession = self.settings_storage.value('TimedDuration', 5).toInt()[0]
-        self.appsettings.dataset.comport = self.settings_storage.value('COM_Port').toInt()[0]
+        self.appsettings.dataset.serialport = self.settings_storage.value('Serial_Port').toString()
         self.settings_storage.endGroup()
 
         self.settings_storage.beginGroup('Storage')
@@ -293,7 +300,7 @@ class MainWindow( QMainWindow ):
 
             self.settings_storage.beginGroup('Misc')
             self.settings_storage.setValue('TimedDuration', self.appsettings.dataset.timedsession )
-            self.settings_storage.setValue('COM_Port', self.appsettings.dataset.comport )
+            self.settings_storage.setValue('Serial_Port', self.appsettings.dataset.serialport )
             self.settings_storage.endGroup()
 
             self.settings_storage.beginGroup('Storage')
@@ -406,7 +413,7 @@ class MainWindow( QMainWindow ):
         # The device has 3 seconds to respond (a timeout is started to close the serial
         # and terminate the thread in case of no response). When the device responds a signal 'Message'
         # is sent to the GUI (the message is the Serial Number of the device).
-        if self.zephyr_connect.connectTo( self.appsettings.dataset.comport ):
+        if self.zephyr_connect.connectTo( self.appsettings.dataset.serialport ):
             self.zephyr_connect.start()
             if VIRTUAL_SERIAL is False:
                 self.timeout = QTimer( self )
@@ -417,7 +424,7 @@ class MainWindow( QMainWindow ):
                 self.logmessage("Serial virtualization in use.")
                 self._toggle_connect_button()
         else:
-            self.logmessage( "Fail to open port COM%d!" % (self.appsettings.dataset.comport+1), 'error' )
+            self.logmessage( "Fail to open port '%s' !" % self.appsettings.dataset.serialport, 'error' )
 
     def disconnect_button(self):
         self.zephyr_connect.terminate()
@@ -426,7 +433,7 @@ class MainWindow( QMainWindow ):
             self.logmessage( "Successfully disconnected from the device." )
 
     def connectionTimeout(self):
-        self.logmessage("Unable to connected to the device on COM%d." % (self.appsettings.dataset.comport+1), 'error' )
+        self.logmessage("Unable to connected to the device on %s." % self.appsettings.dataset.serialport, 'error' )
         self.zephyr_connect.terminate()
         if self.timeout:
             del self.timeout

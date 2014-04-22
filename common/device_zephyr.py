@@ -15,7 +15,7 @@ import time
 import logging
 
 # Set to FALSE to use the real data coming from the device
-VIRTUAL_SERIAL = True
+VIRTUAL_SERIAL = False
 
 # Create test data and use it for the virtual serial (VIRTUAL_SERIAL must be False!)
 CREATE_TEST_DATA = False
@@ -39,7 +39,7 @@ def list_serial_ports():
         return glob.glob('/dev/tty*') + glob.glob('/dev/cu*')
     else:
         # Assume Linux or something else
-        return glob.glob('/dev/ttyS*') + glob.glob('/dev/ttyUSB*')
+        return glob.glob('/dev/ttyS*') + glob.glob('/dev/rfcomm*')
 
 
 class ZephyrConnect( QThread ):
@@ -63,18 +63,18 @@ class ZephyrConnect( QThread ):
         if CREATE_TEST_DATA is True and VIRTUAL_SERIAL is False:
             self.testdata_writer = MessageDataLogger("5-minutes-zephyr-stream")
 
-    def connectTo(self, comport):
+    def connectTo(self, serialport):
         try:
             if VIRTUAL_SERIAL is True:
                 # test_data_dir = "A:\\Projects\\ecgmuzbak\\sft\\py\\zephyr-bt\\test_data"
                 # self.ser = TimedVirtualSerial(test_data_dir + "/120-second-bt-stream.dat",
                 #                          test_data_dir + "/120-second-bt-stream-timing.csv")
-                test_data_dir = "./"
+                test_data_dir = "./testdata"
                 self.ser = TimedVirtualSerial(test_data_dir + "/5-minutes-zephyr-stream.dat",
                                          test_data_dir + "/5-minutes-zephyr-stream-timing.csv")
                 self.connected = True
             else:
-                self.ser = serial.Serial( comport )
+                self.ser = serial.Serial( serialport )
             self.ser.close() # in case the port is already in use
             self.ser.open()
             self.initialize_device()
