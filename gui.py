@@ -1,13 +1,13 @@
 import platform
-import datetime
 import time
 import numpy as np
+from datetime import datetime
 
 from guidata.qt.QtGui import (QWidget, QMainWindow, QVBoxLayout, qApp, QTextEdit,
                                QFont, QColor, QLabel, QAction, QIcon, QHBoxLayout,
                                QLineEdit, QSizePolicy, QMessageBox, QPushButton,
                                QDialog, QDialogButtonBox, QGridLayout, QGroupBox,
-                               QRadioButton, QComboBox
+                               QRadioButton, QComboBox, QSound
                             )
 from guidata.qtwidgets import DockableWidget
 from guidata.qt.QtCore import (Qt, QThread, QSettings, QTimer, QSize, SIGNAL, QT_VERSION_STR, PYQT_VERSION_STR)
@@ -25,7 +25,7 @@ from PyQt4.Qwt5 import (QwtPlot, QwtScaleDraw, QwtText)
 
 # From own files:
 #sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir)))
-from common.hrv import TimeSeriesContainer
+from common.hrv import TimeSeriesContainer, ProcessBreathingWave
 from common.device_zephyr import ZephyrConnect, VIRTUAL_SERIAL, list_serial_ports
 from common.data_storage import DataStorage
 import zephyr.message
@@ -51,7 +51,7 @@ class AppSettings( DataSet ):
             port = label = s
         ports.append( (port, '%s' % label) )
 
-    # must be a tuble like (0,'COM1') for windows
+    # 'ports' must be a tuble, like (0,'COM1') for windows
     serialport = ChoiceItem("Serial Port", ports)
     bh_packets = MultipleChoiceItem("Enable BioHarness Packets",
                                   ["RR Data", "Breathing", "ECG (not implemented yet)",
@@ -156,6 +156,7 @@ class MainWindow( QMainWindow ):
         self.infobox        = myDockableWidget(self, QWidget)
         self.bwpsd          = RealTimePSD( self, 'Breathing PSD', inity=25000 )
         self.rrpsd          = RealTimePSD( self, 'RR-Interval PSD')
+        self.rrsdnn         = RealTimePlot( self, 'RRI SDNN','ms', QColor( 0, 0, 255 ) )
 
         self.logarea.widget.setReadOnly( True )
         self.logarea.widget.setFont( QFont("Courier", 8) )
@@ -183,6 +184,8 @@ class MainWindow( QMainWindow ):
         self.splitDockWidget(self.rrcurve_dock, self.rrpsd_dock, Qt.Horizontal)
         self.splitDockWidget(self.bwcurve_dock, self.bwpsd_dock, Qt.Horizontal)
         self.log_dock = self.add_dockwidget( self.logarea, _("Messages"),  position=Qt.BottomDockWidgetArea)
+        self.rrsdnn_dock = self.add_dockwidget( self.rrsdnn.dockwidget, _("SDNN on RR-Intervals") )
+        self.splitDockWidget(self.rrcurve_dock, self.rrsdnn_dock, Qt.Horizontal)
 
         # setting the name of the dock widget is required to save correclty
         # the postion of the widget when the application close
@@ -192,6 +195,7 @@ class MainWindow( QMainWindow ):
         self.bwcurve_dock.setObjectName('bwcurve_dock')
         self.bwpsd_dock.setObjectName('bwpsd_dock')
         self.log_dock.setObjectName('log_dock')
+        self.rrsdnn_dock.setObjectName('rrsdnn_dock')
 
         self.log_dock.setMinimumHeight( 100 )
         self.log_dock.setMaximumHeight( 300 )
@@ -201,6 +205,11 @@ class MainWindow( QMainWindow ):
         self.bwcurve_dock.setMinimumSize( 400, 200 )
         self.rrpsd_dock.setMinimumSize( 400, 200 )
         self.bwpsd_dock.setMinimumSize( 400, 200 )
+
+        # self.rrsdnn.curve.curveparam.curvestyle = 'Dots'
+        # self.rrsdnn.curve.curveparam.symbol.marker = 'Ellipse'
+        # self.rrsdnn.curve.curveparam.line.width = 3.0
+        # self.rrsdnn.curve.update_params()
 
     def _load_settings(self):
         self.appsettings = DataSetShowGroupBox("Settings",
@@ -241,14 +250,17 @@ class MainWindow( QMainWindow ):
         self.settings_storage.endGroup()
 
     def _init_objects(self):
-        # self.timeseriescontainer.ts_rri = RRIntervals()
-        # self.timeseriescontainer.ts_bw = BreathingWave()
+        # The time series container hold the data of the heart beat and breathing signal
         self.timeseriescontainer = TimeSeriesContainer()
+        self.process_breathing = ProcessBreathingWave( self.timeseriescontainer )
+
         self.sessiontype = 'free'
+
         self.zephyr_connect = ZephyrConnect()
         self.connect( self.zephyr_connect, SIGNAL( 'Message' ), self.printmessage )
         self.connect( self.zephyr_connect, SIGNAL( 'newRRI' ), self.update_RR_plot )
         self.connect( self.zephyr_connect, SIGNAL( 'newBW' ), self.update_BW_plot )
+        #self.connect( self.zephyr_connect, SIGNAL( 'newBW' ), self.process_breathing.calculateMinMax )
 
         # the button are disabled by default
         # they are enabled if the connection to the device is successfull
@@ -261,7 +273,17 @@ class MainWindow( QMainWindow ):
         # and the container where time series are stored
         self.datastorage = DataStorage( self.appsettings.dataset, self.timeseriescontainer )
 
-        # self.psdplot = PSDThread()
+        self.sound_alerts = SoundAlerts()
+        # self.sound_alerts.interval = 1
+
+        # Add the min/max points on the breathing plot
+        self.bw_minmax_curve = make.curve( [ ], [ ], 'Min Max Points', QColor( 250, 170, 250 ) )
+        self.bw_minmax_curve.curveparam.curvestyle = 'Dots'
+        self.bw_minmax_curve.curveparam.symbol.marker = 'Ellipse'
+        self.bw_minmax_curve.curveparam.line.width = 3.0
+        self.bw_minmax_curve.update_params()
+
+        self.bwplot.plot.add_item( self.bw_minmax_curve )
 
     def sendbhcmd( self ):
         cmd =  int(str(self.bhcmdinput.text()), 16)
@@ -347,12 +369,15 @@ class MainWindow( QMainWindow ):
         # Store value in the data-set. We store every value in the dataset
         # but we display only a certain duration specified by 'self.rrplot.window_length'
         self.timeseriescontainer.ts_rri.add_rrinterval( value )
-        # Set the data to the curve with values from the data-set (ds_*) and update the plot 
+        # Set the data to the curve with values from the time series and update the plot
+        # TODO: maybe calculate the start array index with the specified plot window length ?
         self.rrplot.startIdx = self.timeseriescontainer.ts_rri.getSampleIndex( self.rrplot.window_length )
         self.rrplot.update( self.timeseriescontainer.ts_rri.realtime, self.timeseriescontainer.ts_rri.series )
 
+        # Wait minimum 10 samples
         if len(self.timeseriescontainer.ts_rri.series) > 10:
             self.timeseriescontainer.ts_rri.computeLombPeriodogram()
+            self.timeseriescontainer.ts_rri.computeSDNN()
             # if self.psdplot.running is False:
             #         self.psdplot.plot = self.rrpsd
             #         self.psdplot.ts_rri = self.timeseriescontainer.ts_rri
@@ -361,6 +386,8 @@ class MainWindow( QMainWindow ):
             #     self.psdplot.calculate_intermediate()
 
             self.rrpsd.update(self.timeseriescontainer.ts_rri.psd_freq, self.timeseriescontainer.ts_rri.psd_mag)
+            self.rrsdnn.startIdx = self.timeseriescontainer.ts_rri.getSampleIndex( self.rrsdnn.window_length )
+            self.rrsdnn.update( self.timeseriescontainer.ts_rri.realtime, self.timeseriescontainer.ts_rri.sdnn )
             # self.logmessage( "PSD nb smpl: %i, SERIES nb smpl %i " %
             #                  (len(self.timeseriescontainer.ts_rri.psd_freq), len(self.timeseriescontainer.ts_rri.series[self.rrplot.startIdx:-1])) )
                 #sdnn = float("%3.1f" % self.timeseriescontainer.ts_rri.compute_SDNN())
@@ -368,20 +395,40 @@ class MainWindow( QMainWindow ):
 
 
     def update_BW_plot( self, value ):
+        """ Update the breathing wave plot.
+
+        """
         # Store value in the data-set. We store every value in the dataset
         # but we display only a certain duration specified by 'self.rrplot.window_length'
         self.timeseriescontainer.ts_bw.add_breath( value )
+
         # Set the data to the curve with values from the data-set and update the plot 
         self.bwplot.startIdx = self.timeseriescontainer.ts_bw.getSampleIndex( self.bwplot.window_length )
+
         self.bwplot.update( self.timeseriescontainer.ts_bw.realtime, self.timeseriescontainer.ts_bw.series )
 
-        if len(self.timeseriescontainer.ts_bw.series) > 10:
+
+        if len(self.timeseriescontainer.ts_bw.series) > 50:
+
+
+            # ibwtime, ibwval = self.timeseriescontainer.ts_bw.interpolateSignal()
+            # self.timeseriescontainer.ts_bw.calculateMinMax( ibwtime, ibwval )
+            #
+            # idx_start = np.where( self.timeseriescontainer.ts_bw.minmax_time >
+            #                            self.timeseriescontainer.ts_bw.minmax_time[-1]
+            #                            -self.bwplot.window_length )[0][0]
+            #
+            # print "%f - %f" % (self.timeseriescontainer.ts_bw.minmax_time[-1], self.bwplot.window_length*1000)
+            # self.bw_minmax_curve.set_data(  self.timeseriescontainer.ts_bw.minmax_time[idx_start:-1],
+            #                                 self.timeseriescontainer.ts_bw.minmax_val[idx_start:-1] )
+
+            # ---- Compute and display the Power Spectral Density of breathing signal
             self.timeseriescontainer.ts_bw.computeWelchPeriodogram()
             self.bwpsd.update(self.timeseriescontainer.ts_bw.psd_freq, self.timeseriescontainer.ts_bw.psd_mag)
 
     def printmessage( self, message ):
         if message == 'connected':
-            self.logmessage("Successfully connected to the device %s." % self.zephyr_connect.SerialNumber )
+            self.logmessage( "Successfully connected to the device %s." % self.zephyr_connect.SerialNumber )
             self._toggle_connect_button()
             if self.timeout:
                 self.timeout.stop()
@@ -472,6 +519,8 @@ class MainWindow( QMainWindow ):
                 self.timeseriescontainer.ts_bw.setStartTime()
 
         self.timer.start()
+        #self.sound_alerts.start()
+        self.process_breathing.start()
         # handle graphical change:
         self.playAction.setEnabled( False )
         self.timedAction.setEnabled( False )
@@ -487,6 +536,8 @@ class MainWindow( QMainWindow ):
             elif a == 1: self.zephyr_connect.disablePacket('BREATHING')
 
         self.timer.stop()
+        #self.sound_alerts.stop()
+        self.process_breathing.stop()
         # handle graphical change:
         self.playAction.setEnabled( True )
         self.timedAction.setEnabled( True )
@@ -516,7 +567,8 @@ class MainWindow( QMainWindow ):
         sessiondict = { 'duration':duration,
                         'sessiontype':sessiontype,
                         'breathing_zone': self.infosdialog.breathzone.currentIndex()+1,
-                        'note': str(self.infosdialog.note.toPlainText())
+                        'note': str(self.infosdialog.note.toPlainText()),
+                        'alerts': self.sound_alerts.alerts
         }
 
         self.datastorage.store_session( sessiondict )
@@ -579,6 +631,7 @@ class RealTimePlot():
         self.dockwidget    = myDockableWidget(parent, CurveWidget, toolbar=True )
         # widget class: CurveWidget
         # plot class: CurvePlot
+        # curve class: CurveItem
         self.plot = self.dockwidget.widget.plot
         self.plot.add_item( self.curve )
         self.plot.set_antialiasing( True )
@@ -640,7 +693,7 @@ class RealTimePSD():
 
         #self.plot.setAxisScale(QwtPlot.xBottom, 0, 0.5)
         self.plot.set_axis_limits( QwtPlot.xBottom, 0, 0.5 )
-        self.plot.set_axis_limits( QwtPlot.yLeft, 0, inity )
+        #self.plot.set_axis_limits( QwtPlot.yLeft, 0, inity )
 
     def set_data( self, x, y ):
         self.psdcurve.set_data( x, y )
@@ -677,8 +730,8 @@ class RealTimePSD():
         #self.plot.do_autoscale()
         self.plot.replot()
 
-    def sizeHint(self):
-        return QSize(500, 300)
+    # def sizeHint(self):
+    #     return QSize(500, 300)
 
 class DateTimeScaleDraw( QwtScaleDraw ):
     """Class used to draw a datetime axis on the plot.
@@ -690,7 +743,7 @@ class DateTimeScaleDraw( QwtScaleDraw ):
         """ Function used to create the text of each label
         used to draw the axis.
         """
-        dt = datetime.datetime.fromtimestamp( value )
+        dt = datetime.fromtimestamp( value )
         return QwtText( '%s' % dt.strftime( '%H:%M:%S' ) )
 
 class Timer( QThread ):
@@ -765,6 +818,26 @@ class Timer( QThread ):
 
         minutes, seconds = self._convertInMinutes( totalsecs )
         return  minutes, seconds
+
+class SoundAlerts( QThread ):
+    def __init__( self ):
+        QThread.__init__(self )
+        self.interval = 0
+        self.running = False
+        self.sound = QSound('common/notification.wav')
+        self.alerts = []
+
+    def run(self):
+        self.running = True
+        while self.running is True:
+            # time.sleep( self.interval * 60 )
+            time.sleep( 20 )
+            if self.running is True:
+                self.sound.play()
+                self.alerts.append( datetime.now().strftime("%Y-%m-%d %H:%M:%S") )
+
+    def stop( self ):
+        self.running = False
 
 class SessionInfos( QDialog ):
     def __init__(self, parent, appdata):

@@ -53,6 +53,12 @@ class DataStorage():
                 cur.execute("INSERT INTO records_record(create_datetime, duration, rrintervals, breathingwave, "
                             "session_type, breathing_zone, note) "
                             "VALUE(%s, %s, %s, %s, %s, %s, %s)", data)
+                lastinsertid = con.insert_id()
+                alerts = '\n'.join( sessiondata['alerts'] )
+                cur.execute( "INSERT INTO sound_alerts(record_id, alerts) VALUE(%s, %s)", (lastinsertid,alerts) )
+
+
+
 
     def get_session_types(self):
         con = self.db_connect()

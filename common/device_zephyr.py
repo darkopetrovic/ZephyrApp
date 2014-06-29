@@ -4,18 +4,16 @@ from zephyr.collector import MeasurementCollector
 from zephyr.bioharness import BioHarnessSignalAnalysis, BioHarnessPacketHandler
 from zephyr.delayed_stream import DelayedRealTimeStream
 from zephyr.message import MessagePayloadParser
-from zephyr.protocol import Protocol, BioHarnessProtocol, MessageFrameParser, MessageDataLogger
-from zephyr.testing import TimedVirtualSerial, simulation_workflow
-from PyQt4.QtGui import QWidget
+from zephyr.protocol import BioHarnessProtocol, MessageFrameParser, MessageDataLogger
+from zephyr.testing import TimedVirtualSerial
 from PyQt4.QtCore import QThread, SIGNAL
 import platform
 import serial
 import glob
-import time
 import logging
 
 # Set to FALSE to use the real data coming from the device
-VIRTUAL_SERIAL = False
+VIRTUAL_SERIAL = True
 
 # Create test data and use it for the virtual serial (VIRTUAL_SERIAL must be False!)
 CREATE_TEST_DATA = False

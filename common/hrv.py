@@ -3,7 +3,9 @@ import lomb
 import time
 from scipy.sparse import spdiags, eye
 from scipy.signal import welch
+from scipy import interpolate
 from numpy.linalg import inv
+from PyQt4.QtCore import QThread
 import MySQLdb as mdb
 
 STORE_ALL_ELEMENTS = True
@@ -40,6 +42,7 @@ class TimeSeries():
         self.realtime = np.array([])
         self.psd_mag = np.array([])
         self.psd_freq = np.array([])
+        self.sdnn = np.array([])
         self.start_time = 0
         self.cumultime = 0
         self.idx_start = 0
@@ -59,9 +62,9 @@ class TimeSeries():
         self.idx_start = np.where( self.smpltime > self.smpltime[-1]-window_size*1000 )[0][0]
         return self.idx_start
 
-    def compute_SDNN( self ):
+    def computeSDNN( self ):
         if len(self.series) > 2:
-            return self.series[self.idx_start:-1].std(ddof=1)
+            self.sdnn = np.append(self.sdnn, self.series[self.idx_start:-1].std(ddof=1))
         else:
             return 0.0
 
@@ -112,6 +115,7 @@ class RRIntervals( TimeSeries ):
 
     def computeLombPeriodogram( self ):
 
+        # static component (we remove the dynamic component of the signal -> detrending)
         z_stat = self.detrendRRI()
         lombx = self.smpltime[self.idx_start:-1]/1000
         lomby = np.asarray(z_stat.H)[0][self.idx_start:-1]/1000
@@ -149,10 +153,24 @@ class RRIntervals( TimeSeries ):
         self.LFpwr *= 1000
         self.HFpwr *= 1000
 
+    def computeSDNN( self ):
+        if len(self.series) > 2:
+            z_stat = self.detrendRRI()
+            rri_series_detrended = np.asarray(z_stat.H)[0]
+            self.sdnn = np.append( self.sdnn, rri_series_detrended[self.idx_start:-1].std(ddof=1) )
+        else:
+            return 0.0
+
 
 class BreathingWave( TimeSeries ):
     def __init__( self ):
         TimeSeries.__init__( self )
+        self.min = np.array([])
+        self.max = np.array([])
+        self.minmax_time = np.array([])
+        self.minmax_val = np.array([])
+        self.amplitude = np.array([])
+        self.last_index_of_minmax = 0
 
     def add_breath( self, value ):
         # The breathing data are sampled at 18 Hz (56ms)
@@ -163,85 +181,66 @@ class BreathingWave( TimeSeries ):
         self.psd_mag = Pxx_den
         self.psd_freq = f
 
+    def interpolateSignal(self, smoothing=20):
+        """ Interpolate the breathing wave signal.
+            Used to find the amplitude of the signal with the min/max value.
+        """
+        tck = interpolate.splrep(self.realtime[-50:], self.series[-50:], s=smoothing)
+        xmin = self.realtime[-50]
+        xmax = self.realtime[-1]
+        step = 1.0/16.0
+        smpltime_inter = np.arange(xmin, xmax, step)
+        smplvalue_inter = interpolate.splev(smpltime_inter, tck, der=0)
+        return smpltime_inter, smplvalue_inter
 
-class RRI_BW_Data():
-    '''
-    '''
-    def __init__( self ):
+    def calculateMinMax( self, x, y ):
+        """ Store in the numpy arrays 'minmax_time' and 'minmax_val' the
+            peaks of the curve.
 
-        self.prev_val = self.prev_rri = 0
-        self.rri_series = np.array([])
-        self.rri_smpltime = np.array([])
-        self.rri_realtime = np.array([])
-        self.rri_cumulativeTime = 0
+            :param array x:    x axis
+            :param array y:    y axis
+        """
 
-        self.rri_psd_mag = np.array([])
-        self.rri_psd_freq = np.array([])
+        # Return an array of index of the min/max values.
+        index_of_minmax = np.diff(np.sign(np.diff(y))).nonzero()[0] + 1 # local min+max
+        # index_of_min = (np.diff(np.sign(np.diff(self.series[self.idx_start:-1]))) > 0).nonzero()[0] + 1 # local min
+        # index_of_max = (np.diff(np.sign(np.diff(self.series[self.idx_start:-1]))) < 0).nonzero()[0] + 1 # local max
 
-        self.bw_series = np.array([])
-        self.bw_realtime = np.array([])
-
-        self.sdnn_max = 0
-        self.VLFpwr = 0
-        self.LFpwr = 0
-        self.HFpwr = 0
-
-        self.idx_start = 0
-        
-    def setStartTime(self, starttime):
-        self.rri_realtime = np.append( self.rri_realtime, starttime )
-        self.bw_realtime = np.append( self.bw_realtime, starttime )
-
-    def add_rrinterval( self, rri_ms ):
-        self.rri_cumulativeTime += rri_ms
-        self.rri_series = np.append( self.rri_series, rri_ms )
-        self.rri_smpltime = np.append( self.rri_smpltime, self.rri_cumulativeTime )
-        self.rri_realtime = np.append( self.rri_realtime, self.rri_realtime[-1]+float(rri_ms)/1000 )
-
-    def add_breathing( self, value ):
-        self.bw_series = np.append( self.bw_series, value )
-        # The breathing data are sampled at 18 Hz (56ms)
-        self.bw_realtime = np.append( self.bw_realtime, self.bw_realtime[-1]+float(56)/1000 )
-
-    def getSampleIndex( self, window_size ):
-        """ Get the index in the sample time array where the value
-         correspond to a number of 'seconds' back from the last element """
-        self.idx_start = np.where( self.rri_smpltime > self.rri_smpltime[-1]-window_size*1000 )[0][0]
-        return self.idx_start
-
-    def setAnalysisWindow( self, seconds ):
-        self.window_duration = seconds
-
-    def compute_SDNN( self ):
-        if len(self.rri_series) > 2:
-            return self.rri_series[self.idx_start:-1].std(ddof=1)
+        if self.minmax_time.size == 0:
+            for i in index_of_minmax:
+                self.minmax_time = np.append( self.minmax_time, x[i] )
+                self.minmax_val = np.append( self.minmax_val, y[i] )
+            self.last_time = self.minmax_time[-1]
         else:
-            return 0.0
+            for i in index_of_minmax:
+                # the new min/max must be 1 second earlier that the last
+                if x[i] > self.last_time+1:
+                    self.minmax_time = np.append( self.minmax_time, x[i] )
+                    self.minmax_val = np.append( self.minmax_val, y[i] )
+                    self.last_time = self.minmax_time[-1]
 
-    def computePSD( self ):
-        if len(self.rri_series) > 10:
-            
-            fx, fy, nout, jmax, prob = lomb.fasper( self.rri_smpltime[self.idx_start:-1]/1000, 
-                                                   self.rri_series[self.idx_start:-1]/1000, 
-                                                   4., 1.)
-            pwr = ( ( self.rri_series[self.idx_start:-1]/1000-(self.rri_series[self.idx_start:-1]/1000).mean())**2).sum() \
-                    /(len(self.rri_series[self.idx_start:-1])-1)
-            fy = fy/(nout/(4.0*pwr))*1000
-            self.rri_psd_mag = fy
-            self.rri_psd_freq = fx
+class ProcessBreathingWave( QThread ):
+    def __init__( self, tsc):
+        QThread.__init__( self )
+        self.running = False
+        self.tsbw = tsc.ts_bw
+    def run(self):
+        self.running = True
+        minmaxarraysize = self.tsbw.minmax_val.size
+        while self.running is True:
+            time.sleep(0.3)
+            if len(self.tsbw.series) > 50:
+                # ---- Calculate interpolated signal.
+                # Variables ibwtime and ibwval are the x and y of the interpolated signal.
+                # From the interpolated signal we calculate the curve's mininum and maximum value.
+                # The values are stored in the 'minmax_time' and 'minmax_val' arrays in the second function.
+                ibwtime, ibwval = self.tsbw.interpolateSignal()
+                self.tsbw.calculateMinMax( ibwtime, ibwval )
+                if minmaxarraysize < self.tsbw.minmax_val.size:
+                    self.tsbw.amplitude = np.append(self.tsbw.amplitude, abs(self.tsbw.minmax_val[-1] - self.tsbw.minmax_val[-2]))
+                    minmaxarraysize = self.tsbw.minmax_val.size
 
-            # Calculate frequencies power components VLF, LF and HF
-            self.VLFpwr = 0
-            self.LFpwr = 0
-            self.HFpwr = 0
-            for i, f in enumerate( self.rri_psd_freq ):
-                if f > 0 and f <= 0.04:
-                    self.VLFpwr += self.rri_psd_mag[i]
-                elif f > 0.04 and f <= 0.15:
-                    self.LFpwr += self.rri_psd_mag[i]
-                elif f > 0.15 and f <= 0.4:
-                    self.HFpwr += self.rri_psd_mag[i]
-            
-            self.VLFpwr *= 1000
-            self.LFpwr *= 1000
-            self.HFpwr *= 1000
+    def stop( self ):
+        self.running = False
+
+
