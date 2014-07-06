@@ -18,6 +18,11 @@ class TimeSeriesContainer():
     def __init__( self ):
         self.ts_rri = RRIntervals()
         self.ts_bw = BreathingWave()
+        self.heart_rate = np.array([])
+        self.respiration_rate = np.array([])
+        self.posture = np.array([])
+        self.activity = np.array([])
+        self.breathwave_ampltitude = np.array([])
 
     def isNotEmpty(self):
         if self.ts_rri.series.size or self.ts_bw.series.size:
@@ -114,11 +119,15 @@ class RRIntervals( TimeSeries ):
         return z_stat
 
     def computeLombPeriodogram( self ):
+        detrend = False
 
-        # static component (we remove the dynamic component of the signal -> detrending)
-        z_stat = self.detrendRRI()
         lombx = self.smpltime[self.idx_start:-1]/1000
-        lomby = np.asarray(z_stat.H)[0][self.idx_start:-1]/1000
+        if detrend is True:
+            # static component (we remove the dynamic component of the signal -> detrending)
+            z_stat = self.detrendRRI()
+            lomby = np.asarray(z_stat.H)[0][self.idx_start:-1]/1000
+        else:
+            lomby = self.series[self.idx_start:-1]
 
         fx, fy, nout, jmax, prob = lomb.fasper(lombx,lomby, 4., 2.)
         pwr = ((lomby-lomby.mean())**2).sum()/(len(lomby)-1)
@@ -176,8 +185,14 @@ class BreathingWave( TimeSeries ):
         # The breathing data are sampled at 18 Hz (56ms)
         self.add( value, 56 )
 
-    def computeWelchPeriodogram(self):
-        f, Pxx_den = welch(self.series[self.idx_start:-1], 18, nperseg=len(self.series[self.idx_start:-1]))
+    def computeWelchPeriodogram(self, window=60):
+        """
+        Compute the Power Spectral Density of the breathing.
+        """
+        # Since the breahing signal is sampled at 18Hz, the start index is calculated as follow
+        # for a window length defined by the variable window_length in seconds: window_length*18
+        startindex = window*18
+        f, Pxx_den = welch(self.series[-startindex:], 18, nperseg=len(self.series[-startindex:]))
         self.psd_mag = Pxx_den
         self.psd_freq = f
 

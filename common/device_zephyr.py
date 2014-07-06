@@ -13,7 +13,7 @@ import glob
 import logging
 
 # Set to FALSE to use the real data coming from the device
-VIRTUAL_SERIAL = True
+VIRTUAL_SERIAL = False
 
 # Create test data and use it for the virtual serial (VIRTUAL_SERIAL must be False!)
 CREATE_TEST_DATA = False
@@ -52,14 +52,16 @@ class ZephyrConnect( QThread ):
         self.paused = False
         self.running = False
         self.create_test_data = False
-        self.PacketType = {'BREATHING':0x15,
+        self.PacketType = {'GENERAL':0x14,
+                           'BREATHING':0x15,
                            'ECG':0x16,
                            'RRDATA':0x19,
-                           'ACC':0x1E}
+                           'ACC':0x1E,
+                            'SUMMARY':0xBD,}
 
         zephyr.configure_root_logger()
         if CREATE_TEST_DATA is True and VIRTUAL_SERIAL is False:
-            self.testdata_writer = MessageDataLogger("5-minutes-zephyr-stream")
+            self.testdata_writer = MessageDataLogger("5-minutes-zephyr-stream-02")
 
     def connectTo(self, serialport):
         try:
@@ -68,8 +70,8 @@ class ZephyrConnect( QThread ):
                 # self.ser = TimedVirtualSerial(test_data_dir + "/120-second-bt-stream.dat",
                 #                          test_data_dir + "/120-second-bt-stream-timing.csv")
                 test_data_dir = "./testdata"
-                self.ser = TimedVirtualSerial(test_data_dir + "/5-minutes-zephyr-stream.dat",
-                                         test_data_dir + "/5-minutes-zephyr-stream-timing.csv")
+                self.ser = TimedVirtualSerial(test_data_dir + "/5-minutes-zephyr-stream-02.dat",
+                                         test_data_dir + "/5-minutes-zephyr-stream-02-timing.csv")
                 self.connected = True
             else:
                 self.ser = serial.Serial( serialport )
@@ -156,7 +158,24 @@ class ZephyrConnect( QThread ):
             self.emit( SIGNAL( 'newBW' ), value )
 
         if value_name is 'heart_rate':
-            self.emit( SIGNAL( 'newHR' ), value )
+            self.emit( SIGNAL( 'heart_rate' ), value )
+
+        if value_name is 'respiration_rate':
+            self.emit( SIGNAL( 'respiration_rate' ), value )
+
+        if value_name is 'breathing_wave_amplitude':
+            self.emit( SIGNAL( 'breathing_wave_amplitude' ), value )
+
+        if value_name is 'activity':
+            self.emit( SIGNAL( 'activity' ), value )
+
+        if value_name is 'posture':
+            if value > 180:
+                # convert two's complement to decimal
+                posture = value-(1<<16)
+            else:
+                posture = value
+            self.emit( SIGNAL( 'posture' ), posture )
 
     def anyotherpackets( self, message ):
         self.emit( SIGNAL( 'Message' ), message )
@@ -166,7 +185,10 @@ class ZephyrConnect( QThread ):
 
     def enablePacket( self, packet_type ):
         try:
-            self.sendmessage(self.PacketType[packet_type], [1])
+            data = [1]
+            if packet_type == 'SUMMARY':
+                data = [1, 0]
+            self.sendmessage(self.PacketType[packet_type], data)
             return True
         except:
             return False
@@ -179,6 +201,6 @@ class ZephyrConnect( QThread ):
             return False
 
     def create_test_data_function(self, stream_data):
-        if CREATE_TEST_DATA is True  and VIRTUAL_SERIAL is False:
+        if CREATE_TEST_DATA is True and VIRTUAL_SERIAL is False:
             self.testdata_writer( stream_data )
 

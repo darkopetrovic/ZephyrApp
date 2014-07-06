@@ -236,7 +236,12 @@ class MainWindow( QMainWindow ):
 
         self.settings_storage.beginGroup('Misc')
         self.appsettings.dataset.timedsession = self.settings_storage.value('TimedDuration', 5).toInt()[0]
-        self.appsettings.dataset.serialport = self.settings_storage.value('Serial_Port').toString()
+        # handle windows and linux serial port name
+        portname = self.settings_storage.value('Serial_Port').toString()
+        if str(portname).isdigit() is True:
+            self.appsettings.dataset.serialport = int(portname)
+        else:
+             self.appsettings.dataset.serialport = str(portname)
         self.settings_storage.endGroup()
 
         self.settings_storage.beginGroup('Storage')
@@ -271,7 +276,10 @@ class MainWindow( QMainWindow ):
         # Data storage configuration
         # Data storage need the application settings for db credentials
         # and the container where time series are stored
-        self.datastorage = DataStorage( self.appsettings.dataset, self.timeseriescontainer )
+        self.datastorage = DataStorage()
+        if self.appsettings.dataset.enable_database is True:
+            self.datastorage.enableDbStorage( self.appsettings.dataset )
+        self.datastorage.timeseries = self.timeseriescontainer
 
         self.sound_alerts = SoundAlerts()
         # self.sound_alerts.interval = 1
@@ -377,7 +385,7 @@ class MainWindow( QMainWindow ):
         # Wait minimum 10 samples
         if len(self.timeseriescontainer.ts_rri.series) > 10:
             self.timeseriescontainer.ts_rri.computeLombPeriodogram()
-            self.timeseriescontainer.ts_rri.computeSDNN()
+            #self.timeseriescontainer.ts_rri.computeSDNN()
             # if self.psdplot.running is False:
             #         self.psdplot.plot = self.rrpsd
             #         self.psdplot.ts_rri = self.timeseriescontainer.ts_rri
@@ -386,8 +394,8 @@ class MainWindow( QMainWindow ):
             #     self.psdplot.calculate_intermediate()
 
             self.rrpsd.update(self.timeseriescontainer.ts_rri.psd_freq, self.timeseriescontainer.ts_rri.psd_mag)
-            self.rrsdnn.startIdx = self.timeseriescontainer.ts_rri.getSampleIndex( self.rrsdnn.window_length )
-            self.rrsdnn.update( self.timeseriescontainer.ts_rri.realtime, self.timeseriescontainer.ts_rri.sdnn )
+            #self.rrsdnn.startIdx = self.timeseriescontainer.ts_rri.getSampleIndex( self.rrsdnn.window_length )
+            #self.rrsdnn.update( self.timeseriescontainer.ts_rri.realtime, self.timeseriescontainer.ts_rri.sdnn )
             # self.logmessage( "PSD nb smpl: %i, SERIES nb smpl %i " %
             #                  (len(self.timeseriescontainer.ts_rri.psd_freq), len(self.timeseriescontainer.ts_rri.series[self.rrplot.startIdx:-1])) )
                 #sdnn = float("%3.1f" % self.timeseriescontainer.ts_rri.compute_SDNN())
@@ -404,27 +412,26 @@ class MainWindow( QMainWindow ):
 
         # Set the data to the curve with values from the data-set and update the plot 
         self.bwplot.startIdx = self.timeseriescontainer.ts_bw.getSampleIndex( self.bwplot.window_length )
-
         self.bwplot.update( self.timeseriescontainer.ts_bw.realtime, self.timeseriescontainer.ts_bw.series )
 
 
-        if len(self.timeseriescontainer.ts_bw.series) > 50:
-
-
-            # ibwtime, ibwval = self.timeseriescontainer.ts_bw.interpolateSignal()
-            # self.timeseriescontainer.ts_bw.calculateMinMax( ibwtime, ibwval )
-            #
-            # idx_start = np.where( self.timeseriescontainer.ts_bw.minmax_time >
-            #                            self.timeseriescontainer.ts_bw.minmax_time[-1]
-            #                            -self.bwplot.window_length )[0][0]
-            #
-            # print "%f - %f" % (self.timeseriescontainer.ts_bw.minmax_time[-1], self.bwplot.window_length*1000)
-            # self.bw_minmax_curve.set_data(  self.timeseriescontainer.ts_bw.minmax_time[idx_start:-1],
-            #                                 self.timeseriescontainer.ts_bw.minmax_val[idx_start:-1] )
-
-            # ---- Compute and display the Power Spectral Density of breathing signal
-            self.timeseriescontainer.ts_bw.computeWelchPeriodogram()
-            self.bwpsd.update(self.timeseriescontainer.ts_bw.psd_freq, self.timeseriescontainer.ts_bw.psd_mag)
+        # if len(self.timeseriescontainer.ts_bw.series) > 50:
+        #
+        #
+        #     # ibwtime, ibwval = self.timeseriescontainer.ts_bw.interpolateSignal()
+        #     # self.timeseriescontainer.ts_bw.calculateMinMax( ibwtime, ibwval )
+        #     #
+        #     # idx_start = np.where( self.timeseriescontainer.ts_bw.minmax_time >
+        #     #                            self.timeseriescontainer.ts_bw.minmax_time[-1]
+        #     #                            -self.bwplot.window_length )[0][0]
+        #     #
+        #     # print "%f - %f" % (self.timeseriescontainer.ts_bw.minmax_time[-1], self.bwplot.window_length*1000)
+        #     # self.bw_minmax_curve.set_data(  self.timeseriescontainer.ts_bw.minmax_time[idx_start:-1],
+        #     #                                 self.timeseriescontainer.ts_bw.minmax_val[idx_start:-1] )
+        #
+        #     # ---- Compute and display the Power Spectral Density of breathing signal
+        #     self.timeseriescontainer.ts_bw.computeWelchPeriodogram()
+        #     self.bwpsd.update(self.timeseriescontainer.ts_bw.psd_freq, self.timeseriescontainer.ts_bw.psd_mag)
 
     def printmessage( self, message ):
         if message == 'connected':
@@ -514,13 +521,14 @@ class MainWindow( QMainWindow ):
             if a == 0:
                 self.zephyr_connect.enablePacket('RRDATA')
                 self.timeseriescontainer.ts_rri.setStartTime()
+                self.zephyr_connect.enablePacket('SUMMARY')
             elif a == 1:
                 self.zephyr_connect.enablePacket('BREATHING')
                 self.timeseriescontainer.ts_bw.setStartTime()
 
         self.timer.start()
         #self.sound_alerts.start()
-        self.process_breathing.start()
+        #self.process_breathing.start()
         # handle graphical change:
         self.playAction.setEnabled( False )
         self.timedAction.setEnabled( False )
@@ -534,6 +542,7 @@ class MainWindow( QMainWindow ):
         for a in self.appsettings.dataset.bh_packets:
             if a == 0: self.zephyr_connect.disablePacket('RRDATA')
             elif a == 1: self.zephyr_connect.disablePacket('BREATHING')
+        self.zephyr_connect.disablePacket('SUMMARY')
 
         self.timer.stop()
         #self.sound_alerts.stop()
@@ -743,8 +752,11 @@ class DateTimeScaleDraw( QwtScaleDraw ):
         """ Function used to create the text of each label
         used to draw the axis.
         """
-        dt = datetime.fromtimestamp( value )
-        return QwtText( '%s' % dt.strftime( '%H:%M:%S' ) )
+        try:
+            dt = datetime.fromtimestamp( value )
+            return QwtText( '%s' % dt.strftime( '%H:%M:%S' ) )
+        except:
+            pass
 
 class Timer( QThread ):
     def __init__( self, parent ):

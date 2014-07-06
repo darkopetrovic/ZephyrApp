@@ -9,26 +9,25 @@ class BioHarnessSignalAnalysis:
     def __init__(self, signal_callbacks, event_callbacks):
         self.signal_callbacks = signal_callbacks
         self.event_callbacks = event_callbacks
-        
+
         self.latest_rr_value_sign = 0
-    
+
     def handle_signal(self, signal_packet, starts_new_stream):
         if signal_packet.type == "rr":
-            
+
             for sample_number, rr_value in enumerate(signal_packet.samples):
                 signal_discontinuity = (sample_number == 0) and starts_new_stream
-                
+
                 rr_value_sign = cmp(rr_value, 0)
-                
+
                 if rr_value_sign != self.latest_rr_value_sign and not signal_discontinuity:
                     heartbeat_interval = abs(rr_value)
                     heartbeat_interval_timestamp = signal_packet.timestamp + sample_number / float(signal_packet.samplerate)
-                    
+
                     for event_callback in self.event_callbacks:
                         event_callback("heartbeat_interval", (heartbeat_interval_timestamp, heartbeat_interval))
-                
-                self.latest_rr_value_sign = rr_value_sign
 
+                self.latest_rr_value_sign = rr_value_sign
 
 class BioHarnessPacketHandler:
     def __init__(self, signal_callbacks, event_callbacks):
@@ -83,3 +82,4 @@ class BioHarnessPacketHandler:
                 event_callback("activity", (corrected_timestamp, packet.activity))
                 event_callback("heart_rate", (corrected_timestamp, packet.heart_rate))
                 event_callback("respiration_rate", (corrected_timestamp, packet.respiration_rate))
+

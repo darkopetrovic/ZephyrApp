@@ -1,10 +1,20 @@
 import MySQLdb as mdb
 from datetime import datetime
+import inspect
 
 class DataStorage():
-    def __init__( self, settings = None, timeseries = None ):
-        self.settings = settings
-        self.timeseries = timeseries
+    def __init__( self ):
+
+        self.timeseries = None
+        self.settings = None
+
+    def enableDbStorage(self, settings = None):
+        if hasattr(settings, 'enable_database') is True:
+            self.settings = settings
+        elif isinstance(settings, dict):
+            # create object from the dictionary
+            self.settings = type('Settings', (object,), settings)
+            self.settings.enable_database = True
 
     def db_connect(self):
         return mdb.connect(str(self.settings.db_host), str(self.settings.db_user),
@@ -45,14 +55,22 @@ class DataStorage():
                     bwseries_txt += str(int(self.timeseries.ts_bw.smpltime[i])) + ':' + str(int(value))
                     bwseries_txt += '\n'
 
+            heart_rate_txt              = '\n'.join(['%d' % num for num in self.timeseries.heart_rate])
+            respiration_rate_txt        = '\n'.join(['%.1f' % num for num in self.timeseries.respiration_rate])
+            posture_txt                 = '\n'.join(['%d' % num for num in self.timeseries.posture])
+            activity_txt                = '\n'.join(['%.2f' % num for num in self.timeseries.activity])
+            breathwave_ampltitude_txt   = '\n'.join(['%d' % num for num in self.timeseries.breathwave_ampltitude])
+
             today = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            data = (today, sessiondata['duration'], rriseries_txt, bwseries_txt, sessiondata['sessiontype'],
-            sessiondata['breathing_zone'], sessiondata['note'])
+            data = (today, sessiondata['duration'], rriseries_txt, bwseries_txt,
+                    heart_rate_txt, respiration_rate_txt, posture_txt, activity_txt, breathwave_ampltitude_txt,
+                    sessiondata['sessiontype'], sessiondata['breathing_zone'], sessiondata['note'])
             with con:
                 cur = con.cursor()
                 cur.execute("INSERT INTO records_record(create_datetime, duration, rrintervals, breathingwave, "
+                            "heart_rate, respiration_rate, posture, activity, breathwave_amplitude, "
                             "session_type, breathing_zone, note) "
-                            "VALUE(%s, %s, %s, %s, %s, %s, %s)", data)
+                            "VALUE(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)", data)
                 lastinsertid = con.insert_id()
                 alerts = '\n'.join( sessiondata['alerts'] )
                 cur.execute( "INSERT INTO sound_alerts(record_id, alerts) VALUE(%s, %s)", (lastinsertid,alerts) )
