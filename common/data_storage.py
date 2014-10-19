@@ -1,14 +1,13 @@
-import MySQLdb as mdb
-from datetime import datetime
-import inspect
+from influxdb import client as influxdb
+from pandas import DataFrame
+from requests.exceptions import ConnectionError
+import time
 
 class DataStorage():
     def __init__( self ):
-
-        self.timeseries = None
         self.settings = None
 
-    def enableDbStorage(self, settings = None):
+    def db_init(self, settings = None):
         if hasattr(settings, 'enable_database') is True:
             self.settings = settings
         elif isinstance(settings, dict):
@@ -16,80 +15,80 @@ class DataStorage():
             self.settings = type('Settings', (object,), settings)
             self.settings.enable_database = True
 
-    def db_connect(self):
-        return mdb.connect(str(self.settings.db_host), str(self.settings.db_user),
-                            str(self.settings.db_pwd), str(self.settings.db_dbname))
-
-    def test_db_connection(self):
-        con = None
+    def db_connection(self):
+        dbname =  str(self.settings.db_dbname)
+        result = True
         try:
-            con = self.db_connect()
-            cur = con.cursor()
-            cur.execute("SELECT VERSION()")
-            ver = cur.fetchone()
-            return True, ver
+            self.db = influxdb.InfluxDBClient(str(self.settings.db_url), str(self.settings.db_port),
+                                          str(self.settings.db_user), str(self.settings.db_pwd),
+                                          str(self.settings.db_dbname))
+            dblist = self.db.get_database_list()
+        except (influxdb.InfluxDBClientError, ConnectionError) as e:
+            return False, e.args[0]
 
-        except mdb.Error, e:
-            return False, e.args[1]
+        if not any([db['name'] == dbname for db in dblist]):
+            self.db.create_database( dbname )
+            message = "The InfluxDB database '%s' was created." % dbname
+        else:
+            message = "Successfully connected to the InfluxDB database '%s'." % dbname
 
-        finally:
-            if con:
-                con.close()
+        return result, message
 
+    @staticmethod
+    def _result2dataframe(r):
+        return DataFrame(r[0]['points'], columns=r[0]['columns'])
 
-    def store_session( self, sessiondata ):
+    def create_session(self):
+        # get the last session id
+        last_session = self._result2dataframe( self.db.query('select * from all_sessions limit 1') )
+        lastid = int(last_session['id'])
 
-        # store in database
-        if self.settings.enable_database and self.timeseries.isNotEmpty():
-            # connection
-            con = self.db_connect()
+        data = [{
+                    "name": "all_sessions",
+                    "columns":["time", "id", "duration_sec", "session_type", "breathing_zone", "note"],
+                    "points":[[time.time(), lastid+1, "", "", "", ""]]
+                }]
 
-            rriseries_txt = bwseries_txt = ''
-            if self.timeseries.ts_rri.series.size:
-                for i, value in enumerate(self.timeseries.ts_rri.series):
-                    rriseries_txt += str(int(self.timeseries.ts_rri.smpltime[i])) + ':' + str(int(value))
-                    rriseries_txt += '\n'
+        self.db.write_points(data)
 
-            if self.timeseries.ts_bw.series.size:
-                for i, value in enumerate(self.timeseries.ts_bw.series):
-                    bwseries_txt += str(int(self.timeseries.ts_bw.smpltime[i])) + ':' + str(int(value))
-                    bwseries_txt += '\n'
+    def update_duration(self, duration):
+        r = self.db.query('select time, sequence_number from all_sessions limit 1 order desc')
+        data = [{
+                    "name": "all_sessions",
+                    "columns":["time", "sequence_number", "duration_sec"],
+                    "points":[[r[0]['points'][0][0], r[0]['points'][0][1], duration]]
+                }]
+        self.db.write_points(data)
 
-            heart_rate_txt              = '\n'.join(['%d' % num for num in self.timeseries.heart_rate])
-            respiration_rate_txt        = '\n'.join(['%.1f' % num for num in self.timeseries.respiration_rate])
-            posture_txt                 = '\n'.join(['%d' % num for num in self.timeseries.posture])
-            activity_txt                = '\n'.join(['%.2f' % num for num in self.timeseries.activity])
-            breathwave_ampltitude_txt   = '\n'.join(['%d' % num for num in self.timeseries.breathwave_ampltitude])
+    def add_informations( self, sessiondata ):
+        if self.settings.enable_database:
+            r = self.db.query('select time, sequence_number from all_sessions limit 1 order desc')
+            data = [{
+                        "name": "all_sessions",
+                        "columns":["time", "sequence_number", "session_type", "breathing_zone", "note"],
+                        "points":[[r[0]['points'][0][0], r[0]['points'][0][1],
+                                   sessiondata['session_type'], sessiondata['breathing_zone'], sessiondata['note']]]
+                    }]
+            self.db.write_points(data)
 
-            today = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            data = (today, sessiondata['duration'], rriseries_txt, bwseries_txt,
-                    heart_rate_txt, respiration_rate_txt, posture_txt, activity_txt, breathwave_ampltitude_txt,
-                    sessiondata['sessiontype'], sessiondata['breathing_zone'], sessiondata['note'])
-            with con:
-                cur = con.cursor()
-                cur.execute("INSERT INTO records_record(create_datetime, duration, rrintervals, breathingwave, "
-                            "heart_rate, respiration_rate, posture, activity, breathwave_amplitude, "
-                            "session_type, breathing_zone, note) "
-                            "VALUE(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)", data)
-                lastinsertid = con.insert_id()
-                alerts = '\n'.join( sessiondata['alerts'] )
-                cur.execute( "INSERT INTO sound_alerts(record_id, alerts) VALUE(%s, %s)", (lastinsertid,alerts) )
+    def write_points(self, series, value, timestamp=None, precision='s'):
 
+        if timestamp is not None:
+            columns = ["time", "value"]
 
+            if isinstance(value, list):
+                points = [[timestamp[i], val] for i, val in enumerate(value)]
+            else:
+                points = [[timestamp, value]]
+        else:
+            columns = ["value"]
+            points = [[value]]
 
+        pass
 
-    def get_session_types(self):
-        con = self.db_connect()
-        with con:
-            cur = con.cursor()
-            cur.execute("SELECT * FROM session_type")
-            types = cur.fetchall()
-            return types
-
-    def get_breathing_zones(self):
-        con = self.db_connect()
-        with con:
-            cur = con.cursor()
-            cur.execute("SELECT * FROM breathing_zone")
-            rows = cur.fetchall()
-            return rows
+        data = [{
+                    "name": series,
+                    "columns": columns,
+                    "points": points
+                }]
+        self.db.write_points_with_precision(data, precision)

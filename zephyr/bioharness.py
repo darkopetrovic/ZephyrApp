@@ -82,4 +82,6 @@ class BioHarnessPacketHandler:
                 event_callback("activity", (corrected_timestamp, packet.activity))
                 event_callback("heart_rate", (corrected_timestamp, packet.heart_rate))
                 event_callback("respiration_rate", (corrected_timestamp, packet.respiration_rate))
+                event_callback("posture", (corrected_timestamp, packet.posture))
+                event_callback("breathing_wave_amplitude", (corrected_timestamp, packet.breathing_wave_amplitude))
 

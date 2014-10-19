@@ -26,7 +26,7 @@ from PyQt4.Qwt5 import (QwtPlot, QwtScaleDraw, QwtText)
 # From own files:
 #sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir)))
 from common.hrv import TimeSeriesContainer, ProcessBreathingWave
-from common.device_zephyr import ZephyrConnect, VIRTUAL_SERIAL, list_serial_ports
+from common.device_zephyr import ZephyrDevice, VIRTUAL_SERIAL, list_serial_ports
 from common.data_storage import DataStorage
 import zephyr.message
 #from noise import MakeNoise
@@ -40,6 +40,7 @@ DataStorage_database    = ValueProp(False)
 DataStorage_files       = ValueProp(False)
 
 class AppSettings( DataSet ):
+
     serialports = list_serial_ports()
     ports = []
     for s in serialports:
@@ -65,10 +66,11 @@ class AppSettings( DataSet ):
 
     g1 = BeginGroup("Data Storage")
     # Database storage:
-    enable_database = BoolItem(u"Enable database storage",
+    enable_database = BoolItem(u"Enable InfluxDB storage",
                        help=u"If disabled, the following parameters will be ignored",
                        default=False).set_prop("display", store=DataStorage_database)
-    db_host = StringItem(u"Host", notempty=True).set_prop("display", active=DataStorage_database)
+    db_url = StringItem(u"URL", notempty=True).set_prop("display", active=DataStorage_database)
+    db_port = StringItem(u"Port", notempty=True).set_prop("display", active=DataStorage_database)
     db_user = StringItem(u"User", notempty=True).set_prop("display", active=DataStorage_database)
     db_pwd = StringItem(u"Password", notempty=True).set_prop("display", active=DataStorage_database)
     db_dbname = StringItem(u"Database", notempty=True).set_prop("display", active=DataStorage_database)
@@ -152,11 +154,11 @@ class MainWindow( QMainWindow ):
 
         self.rrplot         = RealTimePlot( self, 'RR-Interval', 'ms', QColor( 255, 0, 0 ) )
         self.bwplot         = RealTimePlot( self, 'Breathing','', QColor( 0, 0, 255 ) )
+        self.ecgplot        = RealTimePlot( self, 'ECG Waveform','', QColor( 0, 0, 255 ) )
         self.logarea        = myDockableWidget(self, QTextEdit)
         self.infobox        = myDockableWidget(self, QWidget)
         self.bwpsd          = RealTimePSD( self, 'Breathing PSD', inity=25000 )
         self.rrpsd          = RealTimePSD( self, 'RR-Interval PSD')
-        self.rrsdnn         = RealTimePlot( self, 'RRI SDNN','ms', QColor( 0, 0, 255 ) )
 
         self.logarea.widget.setReadOnly( True )
         self.logarea.widget.setFont( QFont("Courier", 8) )
@@ -184,8 +186,8 @@ class MainWindow( QMainWindow ):
         self.splitDockWidget(self.rrcurve_dock, self.rrpsd_dock, Qt.Horizontal)
         self.splitDockWidget(self.bwcurve_dock, self.bwpsd_dock, Qt.Horizontal)
         self.log_dock = self.add_dockwidget( self.logarea, _("Messages"),  position=Qt.BottomDockWidgetArea)
-        self.rrsdnn_dock = self.add_dockwidget( self.rrsdnn.dockwidget, _("SDNN on RR-Intervals") )
-        self.splitDockWidget(self.rrcurve_dock, self.rrsdnn_dock, Qt.Horizontal)
+        self.ecgplot_dock = self.add_dockwidget( self.ecgplot.dockwidget, _("SDNN on RR-Intervals") )
+        self.splitDockWidget(self.rrcurve_dock, self.ecgplot_dock, Qt.Horizontal)
 
         # setting the name of the dock widget is required to save correclty
         # the postion of the widget when the application close
@@ -195,7 +197,7 @@ class MainWindow( QMainWindow ):
         self.bwcurve_dock.setObjectName('bwcurve_dock')
         self.bwpsd_dock.setObjectName('bwpsd_dock')
         self.log_dock.setObjectName('log_dock')
-        self.rrsdnn_dock.setObjectName('rrsdnn_dock')
+        self.ecgplot_dock.setObjectName('ecgplot_dock')
 
         self.log_dock.setMinimumHeight( 100 )
         self.log_dock.setMaximumHeight( 300 )
@@ -206,10 +208,10 @@ class MainWindow( QMainWindow ):
         self.rrpsd_dock.setMinimumSize( 400, 200 )
         self.bwpsd_dock.setMinimumSize( 400, 200 )
 
-        # self.rrsdnn.curve.curveparam.curvestyle = 'Dots'
-        # self.rrsdnn.curve.curveparam.symbol.marker = 'Ellipse'
-        # self.rrsdnn.curve.curveparam.line.width = 3.0
-        # self.rrsdnn.curve.update_params()
+        # self.ecgplot.curve.curveparam.curvestyle = 'Dots'
+        # self.ecgplot.curve.curveparam.symbol.marker = 'Ellipse'
+        # self.ecgplot.curve.curveparam.line.width = 3.0
+        # self.ecgplot.curve.update_params()
 
     def _load_settings(self):
         self.appsettings = DataSetShowGroupBox("Settings",
@@ -246,7 +248,8 @@ class MainWindow( QMainWindow ):
 
         self.settings_storage.beginGroup('Storage')
         self.appsettings.dataset.enable_database = self.settings_storage.value('db_enable', False).toBool()
-        self.appsettings.dataset.db_host = self.settings_storage.value('db_host').toString()
+        self.appsettings.dataset.db_url = self.settings_storage.value('db_url').toString()
+        self.appsettings.dataset.db_port = self.settings_storage.value('db_port').toString()
         self.appsettings.dataset.db_user = self.settings_storage.value('db_user').toString()
         self.appsettings.dataset.db_pwd = self.settings_storage.value('db_pwd').toString()
         self.appsettings.dataset.db_dbname = self.settings_storage.value('db_dbname').toString()
@@ -261,11 +264,16 @@ class MainWindow( QMainWindow ):
 
         self.sessiontype = 'free'
 
-        self.zephyr_connect = ZephyrConnect()
+        self.zephyr_connect = ZephyrDevice()
         self.connect( self.zephyr_connect, SIGNAL( 'Message' ), self.printmessage )
-        self.connect( self.zephyr_connect, SIGNAL( 'newRRI' ), self.update_RR_plot )
-        self.connect( self.zephyr_connect, SIGNAL( 'newBW' ), self.update_BW_plot )
-        #self.connect( self.zephyr_connect, SIGNAL( 'newBW' ), self.process_breathing.calculateMinMax )
+        self.connect( self.zephyr_connect, SIGNAL( 'rrinterval' ), self.update_RR_plot )
+        self.connect( self.zephyr_connect, SIGNAL( 'breathing_wave' ), self.update_BW_plot )
+        self.connect( self.zephyr_connect, SIGNAL( 'ecg' ), self.update_ECG_plot )
+        self.connect( self.zephyr_connect, SIGNAL( 'heart_rate' ), self.add_heart_rate )
+        self.connect( self.zephyr_connect, SIGNAL( 'respiration_rate' ), self.add_respiration_rate )
+        self.connect( self.zephyr_connect, SIGNAL( 'breathing_wave_amplitude' ), self.add_breathing_wave_amplitude )
+        self.connect( self.zephyr_connect, SIGNAL( 'activity' ), self.add_activity )
+        self.connect( self.zephyr_connect, SIGNAL( 'posture' ), self.add_posture )
 
         # the button are disabled by default
         # they are enabled if the connection to the device is successfull
@@ -273,13 +281,12 @@ class MainWindow( QMainWindow ):
         self.playAction.setEnabled( False )
         self.timedAction.setEnabled( False )
 
-        # Data storage configuration
+        # InfluxDB storage configuration
         # Data storage need the application settings for db credentials
-        # and the container where time series are stored
         self.datastorage = DataStorage()
         if self.appsettings.dataset.enable_database is True:
-            self.datastorage.enableDbStorage( self.appsettings.dataset )
-        self.datastorage.timeseries = self.timeseriescontainer
+            self.datastorage.db_init( self.appsettings.dataset )
+            self._test_database_connection()
 
         self.sound_alerts = SoundAlerts()
         # self.sound_alerts.interval = 1
@@ -335,7 +342,8 @@ class MainWindow( QMainWindow ):
 
             self.settings_storage.beginGroup('Storage')
             self.settings_storage.setValue('db_enable', str(self.appsettings.dataset.enable_database) )
-            self.settings_storage.setValue('db_host', self.appsettings.dataset.db_host )
+            self.settings_storage.setValue('db_url', self.appsettings.dataset.db_url )
+            self.settings_storage.setValue('db_port', self.appsettings.dataset.db_port )
             self.settings_storage.setValue('db_user', str(self.appsettings.dataset.db_user) )
             self.settings_storage.setValue('db_pwd', str(self.appsettings.dataset.db_pwd) )
             self.settings_storage.setValue('db_dbname', str(self.appsettings.dataset.db_dbname) )
@@ -344,13 +352,14 @@ class MainWindow( QMainWindow ):
             self.settings_storage.endGroup()
 
         if ok==1 and self.appsettings.dataset.enable_database:
-            result, message = self.datastorage.test_db_connection()
+            self._test_database_connection()
 
-            if result:
-                self.logmessage("Connection to the database '%s established'." % message)
-            else:
-                self.logmessage("Connection to the database failed: %s" % message, 'error')
-
+    def _test_database_connection(self):
+        result, message = self.datastorage.db_connection()
+        if result:
+            self.logmessage(message)
+        else:
+            self.logmessage("Connection to the database failed: %s" % message, 'error')
 
     #------GUI refresh/setup
     def add_dockwidget( self, child, title, orientation = Qt.Vertical, position=None ):
@@ -377,6 +386,7 @@ class MainWindow( QMainWindow ):
         # Store value in the data-set. We store every value in the dataset
         # but we display only a certain duration specified by 'self.rrplot.window_length'
         self.timeseriescontainer.ts_rri.add_rrinterval( value )
+        self.datastorage.write_points('rrintervals', value, self.timeseriescontainer.ts_rri.realtime[-1]*1000, 'm')
         # Set the data to the curve with values from the time series and update the plot
         # TODO: maybe calculate the start array index with the specified plot window length ?
         self.rrplot.startIdx = self.timeseriescontainer.ts_rri.getSampleIndex( self.rrplot.window_length )
@@ -394,13 +404,12 @@ class MainWindow( QMainWindow ):
             #     self.psdplot.calculate_intermediate()
 
             self.rrpsd.update(self.timeseriescontainer.ts_rri.psd_freq, self.timeseriescontainer.ts_rri.psd_mag)
-            #self.rrsdnn.startIdx = self.timeseriescontainer.ts_rri.getSampleIndex( self.rrsdnn.window_length )
-            #self.rrsdnn.update( self.timeseriescontainer.ts_rri.realtime, self.timeseriescontainer.ts_rri.sdnn )
+            #self.ecgplot.startIdx = self.timeseriescontainer.ts_rri.getSampleIndex( self.ecgplot.window_length )
+            #self.ecgplot.update( self.timeseriescontainer.ts_rri.realtime, self.timeseriescontainer.ts_rri.sdnn )
             # self.logmessage( "PSD nb smpl: %i, SERIES nb smpl %i " %
             #                  (len(self.timeseriescontainer.ts_rri.psd_freq), len(self.timeseriescontainer.ts_rri.series[self.rrplot.startIdx:-1])) )
                 #sdnn = float("%3.1f" % self.timeseriescontainer.ts_rri.compute_SDNN())
                 #self.lbl_sdnn.setText( "SDNN: %3.1f ms" % sdnn )
-
 
     def update_BW_plot( self, value ):
         """ Update the breathing wave plot.
@@ -409,7 +418,7 @@ class MainWindow( QMainWindow ):
         # Store value in the data-set. We store every value in the dataset
         # but we display only a certain duration specified by 'self.rrplot.window_length'
         self.timeseriescontainer.ts_bw.add_breath( value )
-
+        self.datastorage.write_points('breathing_wave', value, self.timeseriescontainer.ts_bw.realtime[-1]*1000, 'm')
         # Set the data to the curve with values from the data-set and update the plot 
         self.bwplot.startIdx = self.timeseriescontainer.ts_bw.getSampleIndex( self.bwplot.window_length )
         self.bwplot.update( self.timeseriescontainer.ts_bw.realtime, self.timeseriescontainer.ts_bw.series )
@@ -433,13 +442,42 @@ class MainWindow( QMainWindow ):
         #     self.timeseriescontainer.ts_bw.computeWelchPeriodogram()
         #     self.bwpsd.update(self.timeseriescontainer.ts_bw.psd_freq, self.timeseriescontainer.ts_bw.psd_mag)
 
+    def update_ECG_plot( self, values ):
+
+        self.timeseriescontainer.ts_ecg.add_ecg( values )
+        #self.datastorage.write_points('ecg', values, self.timeseriescontainer.ts_ecg.realtime[-len(values):]*1000, 'm')
+
+        self.ecgplot.startIdx = self.timeseriescontainer.ts_ecg.getSampleIndex( 6 )
+        self.ecgplot.update( self.timeseriescontainer.ts_ecg.realtime, self.timeseriescontainer.ts_ecg.series )
+
+
+    def add_heart_rate(self, value):
+        self.timeseriescontainer.heart_rate = np.append(self.timeseriescontainer.heart_rate, value)
+        self.datastorage.write_points('heart_rate', value)
+
+    def add_respiration_rate(self, value):
+        self.timeseriescontainer.respiration_rate = np.append(self.timeseriescontainer.respiration_rate, value)
+        self.datastorage.write_points('respiration_rate', value)
+
+    def add_breathing_wave_amplitude(self, value):
+        self.timeseriescontainer.breathwave_ampltitude = np.append(self.timeseriescontainer.breathwave_ampltitude,value)
+        self.datastorage.write_points('breathing_wave_amplitude', value)
+
+    def add_activity(self, value):
+        self.timeseriescontainer.activity = np.append(self.timeseriescontainer.activity, value)
+        self.datastorage.write_points('activity', value)
+
+    def add_posture(self, value):
+        self.timeseriescontainer.posture = np.append(self.timeseriescontainer.posture, value)
+        self.datastorage.write_points('posture', value)
+
     def printmessage( self, message ):
         if message == 'connected':
             self.logmessage( "Successfully connected to the device %s." % self.zephyr_connect.SerialNumber )
             self._toggle_connect_button()
             if self.timeout:
                 self.timeout.stop()
-                del self.timeout
+                self.timeout = None
 
         if isinstance(message, zephyr.message.BatteryStatus):
             self.logmessage("Battery charge is %d%%" % message.Charge )
@@ -490,7 +528,7 @@ class MainWindow( QMainWindow ):
         self.logmessage("Unable to connected to the device on %s." % self.appsettings.dataset.serialport, 'error' )
         self.zephyr_connect.terminate()
         if self.timeout:
-            del self.timeout
+            self.timeout = None
 
     def start_free_session_button( self ):
         self.sessiontype = 'free'
@@ -498,9 +536,22 @@ class MainWindow( QMainWindow ):
         self.session_start()
 
     def start_timed_session_button(self):
-        self.sessiontype = 'timed'
-        self.timer.initialize( self.appsettings.dataset.timedsession * 60 )
-        self.session_start()
+
+        if not self.timeout:
+            self.sessiontype = 'timed'
+            self.timer.initialize( self.appsettings.dataset.timedsession * 60 )
+            # the session will start after 'X' seconds
+            X = 20
+            self.timeout = QTimer( self )
+            self.connect( self.timeout, SIGNAL( 'timeout()' ), self.session_start )
+            self.timeout.setSingleShot(True)
+            self.timeout.start(X*1000)
+            self.logmessage('The session will start in %d seconds.' % X)
+        else:
+             # the button is pressed a second time
+            self.timeout.stop()
+            self.timeout = None
+            self.session_start()
 
     def stop_button( self ):
         sel = 0
@@ -512,6 +563,10 @@ class MainWindow( QMainWindow ):
             self.session_stop()
 
     def session_start( self ):
+        if self.timeout:
+            self.timeout.stop()
+            self.timeout = None
+
         self.timeseriescontainer.clearContainer()
 
         if VIRTUAL_SERIAL is True:
@@ -525,6 +580,9 @@ class MainWindow( QMainWindow ):
             elif a == 1:
                 self.zephyr_connect.enablePacket('BREATHING')
                 self.timeseriescontainer.ts_bw.setStartTime()
+            elif a == 2:
+                self.zephyr_connect.enablePacket('ECG')
+                self.timeseriescontainer.ts_ecg.setStartTime()
 
         self.timer.start()
         #self.sound_alerts.start()
@@ -535,6 +593,10 @@ class MainWindow( QMainWindow ):
         self.stopAction.setEnabled( True )
         self.connectAction.setEnabled( False )
 
+        # in any case, we create the new session in database because the
+        # data are written in real time
+        self.datastorage.create_session()
+
     def session_stop(self):
         if VIRTUAL_SERIAL is True:
             self.zephyr_connect.pause()
@@ -542,6 +604,7 @@ class MainWindow( QMainWindow ):
         for a in self.appsettings.dataset.bh_packets:
             if a == 0: self.zephyr_connect.disablePacket('RRDATA')
             elif a == 1: self.zephyr_connect.disablePacket('BREATHING')
+            elif a == 2: self.zephyr_connect.disablePacket('ECG')
         self.zephyr_connect.disablePacket('SUMMARY')
 
         self.timer.stop()
@@ -553,35 +616,29 @@ class MainWindow( QMainWindow ):
         self.stopAction.setEnabled( False )
         self.connectAction.setEnabled( True )
 
-        # store the current session?
+        # update session with the duration
+        self.datastorage.update_duration(self.timer.getRunningTime())
+
+        # store more info for the current session?
         if self.appsettings.dataset.enable_database or self.appsettings.dataset.enable_files:
             self.infosdialog = SessionInfos( self, self.datastorage )
-            self.connect(self.infosdialog, SIGNAL('accepted()'), self.session_store )
+            self.connect(self.infosdialog, SIGNAL('accepted()'), self.add_more_infos )
             self.infosdialog.exec_()
 
-            # sel = QMessageBox.question(self, "Save Session", "Store the current session?", "Yes", "No")
-            # if sel == 0:
-            #
-            #
-
-
-    def session_store(self):
-        minutes,seconds = self.timer.getRunningTime()
-        duration = str(minutes) + ":" + str(seconds)
-
+    def add_more_infos(self):
+        sessiontype = 0
         for i, r in enumerate(self.infosdialog.sessiontypes):
             if r.isChecked():
                 sessiontype = i+1
 
-        sessiondict = { 'duration':duration,
-                        'sessiontype':sessiontype,
-                        'breathing_zone': self.infosdialog.breathzone.currentIndex()+1,
-                        'note': str(self.infosdialog.note.toPlainText()),
-                        'alerts': self.sound_alerts.alerts
-        }
+        breathing_zone = self.infosdialog.breathzone.currentIndex()
+        infos = {   'session_type': sessiontype,
+                    'breathing_zone': '' if breathing_zone == 0 else breathing_zone,
+                    'note': str(self.infosdialog.note.toPlainText()),
+                }
 
-        self.datastorage.store_session( sessiondict )
-        self.logmessage("Session stored in database.")
+        self.datastorage.add_informations( infos )
+        self.logmessage("The information was stored in the database for this session.")
 
     def closeEvent(self, event):
         self.settings_storage.setValue( 'docksGeometry', self.saveGeometry() )
@@ -795,6 +852,7 @@ class Timer( QThread ):
                     self.currsecond -= 1
                 else:
                     self.emit( SIGNAL( 'SessionStop' ) )
+                    self.stop()
             self.update_timer_display( self.currsecond )
 
     def stop( self ):
@@ -828,8 +886,8 @@ class Timer( QThread ):
         else:
             totalsecs = self.currsecond
 
-        minutes, seconds = self._convertInMinutes( totalsecs )
-        return  minutes, seconds
+        # minutes, seconds = self._convertInMinutes( totalsecs )
+        return totalsecs
 
 class SoundAlerts( QThread ):
     def __init__( self ):
@@ -864,9 +922,9 @@ class SessionInfos( QDialog ):
 
         labelcombo = QLabel( 'Breathing Zone:' )
         self.breathzone = QComboBox()
-        zones = self.appdata.get_breathing_zones()
-        for z in zones:
-            self.breathzone.addItem( z[1], z[0] )
+        self.breathzone.addItem( '', '' )
+        self.breathzone.addItem( 'Abdominal', 1 )
+        self.breathzone.addItem( 'Thoracic', 2 )
 
         self.breathzone.move(10, 10)
 
@@ -896,9 +954,9 @@ class SessionInfos( QDialog ):
         groupBox = QGroupBox(' Session Type' )
         vbox = QVBoxLayout()
         self.sessiontypes = []
-        types = self.appdata.get_session_types()
+        types = [['Unconscious', 0], ['Mindfull', 1]]
         for t in types:
-            self.sessiontypes.append( QRadioButton( t[1] ) )
+            self.sessiontypes.append( QRadioButton( t[0] ) )
             vbox.addWidget( self.sessiontypes[-1] )
         self.sessiontypes[0].setChecked(True)
         vbox.addStretch(1)

@@ -11,6 +11,7 @@ import platform
 import serial
 import glob
 import logging
+import time
 
 # Set to FALSE to use the real data coming from the device
 VIRTUAL_SERIAL = False
@@ -40,7 +41,7 @@ def list_serial_ports():
         return glob.glob('/dev/ttyS*') + glob.glob('/dev/rfcomm*')
 
 
-class ZephyrConnect( QThread ):
+class ZephyrDevice( QThread ):
     """ Send QT signal whenever the selected packet is received
         from the device
     """
@@ -52,11 +53,11 @@ class ZephyrConnect( QThread ):
         self.paused = False
         self.running = False
         self.create_test_data = False
-        self.PacketType = {'GENERAL':0x14,
-                           'BREATHING':0x15,
-                           'ECG':0x16,
-                           'RRDATA':0x19,
-                           'ACC':0x1E,
+        self.PacketType = { 'GENERAL':0x14,
+                            'BREATHING':0x15,
+                            'ECG':0x16,
+                            'RRDATA':0x19,
+                            'ACC':0x1E,
                             'SUMMARY':0xBD,}
 
         zephyr.configure_root_logger()
@@ -102,7 +103,7 @@ class ZephyrConnect( QThread ):
 
         # The delayed stream is useful to synchronize the data coming from the device
         # and provides an easy reading by sending tuples like (signal name, sample value)
-        self.delayed_stream_thread = DelayedRealTimeStream(collector, [self.callback], 1.2)
+        self.delayed_stream_thread = DelayedRealTimeStream(collector, [self.callback], 5)
 
         self.protocol = BioHarnessProtocol(self.ser, [message_parser.parse_data, self.create_test_data_function])
 
@@ -110,6 +111,7 @@ class ZephyrConnect( QThread ):
             self.protocol.add_initilization_message( 0x0B, []) # get Serial Number
             self.connect( self, SIGNAL( 'Message' ), self._callback_serial_test )
             # by default disable every packet:
+            self.protocol.add_initilization_message(self.PacketType['SUMMARY'], [0]) # disable summary packet
             self.protocol.add_initilization_message(self.PacketType['BREATHING'], [0]) # disable breathing waveform
             self.protocol.add_initilization_message(self.PacketType['ECG'], [0]) # disable ecg waveform
             self.protocol.add_initilization_message(self.PacketType['RRDATA'], [0]) # disable rr data
@@ -129,8 +131,11 @@ class ZephyrConnect( QThread ):
         self.delayed_stream_thread.start()
         self.protocol.start()
         while self.running:
-            pass
-        logging.debug("ZephyrConnect QThread is out of the while loop.")
+            try:
+                time.sleep(1)
+            except KeyboardInterrupt:
+                self.terminate()
+        logging.debug("ZephyrDevice QThread is out of the while loop.")
 
     def terminate(self):
         self.protocol.terminate()
@@ -152,10 +157,13 @@ class ZephyrConnect( QThread ):
         if value_name is 'rr' and value != self.prev_val:
             rri_ms = int(abs(value)*1000)
             self.prev_val = value
-            self.emit( SIGNAL( 'newRRI' ), rri_ms )
+            self.emit( SIGNAL( 'rrinterval' ), rri_ms )
 
         if value_name is 'breathing':
-            self.emit( SIGNAL( 'newBW' ), value )
+            self.emit( SIGNAL( 'breathing_wave' ), value )
+
+        # if value_name is 'ecg':
+        #     self.emit( SIGNAL( 'ecg' ), value )
 
         if value_name is 'heart_rate':
             self.emit( SIGNAL( 'heart_rate' ), value )
@@ -180,6 +188,12 @@ class ZephyrConnect( QThread ):
     def anyotherpackets( self, message ):
         self.emit( SIGNAL( 'Message' ), message )
 
+        # since the ecg waveform is sampled at 250 Hz, ...
+        if type(message) is zephyr.message.SignalPacket and message.type == 'ecg':
+            self.emit( SIGNAL( 'ecg' ), message.samples )
+
+        print message
+
     def sendmessage(self, message_id, payload):
         self.protocol.add_initilization_message(message_id, payload)
 
@@ -195,7 +209,10 @@ class ZephyrConnect( QThread ):
 
     def disablePacket( self, packet_type ):
         try:
-            self.sendmessage(self.PacketType[packet_type], [0])
+            data = [0]
+            if packet_type == 'SUMMARY':
+                data = [0, 0]
+            self.sendmessage(self.PacketType[packet_type], data)
             return True
         except:
             return False

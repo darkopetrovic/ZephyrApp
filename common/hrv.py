@@ -18,6 +18,7 @@ class TimeSeriesContainer():
     def __init__( self ):
         self.ts_rri = RRIntervals()
         self.ts_bw = BreathingWave()
+        self.ts_ecg = ECG()
         self.heart_rate = np.array([])
         self.respiration_rate = np.array([])
         self.posture = np.array([])
@@ -33,6 +34,11 @@ class TimeSeriesContainer():
     def clearContainer(self):
         self.ts_rri.clear()
         self.ts_bw.clear()
+        self.heart_rate = np.array([])
+        self.respiration_rate = np.array([])
+        self.posture = np.array([])
+        self.activity = np.array([])
+        self.breathwave_ampltitude = np.array([])
 
 
 class TimeSeries():
@@ -233,6 +239,16 @@ class BreathingWave( TimeSeries ):
                     self.minmax_time = np.append( self.minmax_time, x[i] )
                     self.minmax_val = np.append( self.minmax_val, y[i] )
                     self.last_time = self.minmax_time[-1]
+
+class ECG( TimeSeries ):
+    def __init__( self ):
+        TimeSeries.__init__( self )
+
+    def add_ecg( self, values ):
+        #  Each ECG Waveform sample is 4ms later than the previous one.
+        for value in values:
+            self.add( value, 4 )
+
 
 class ProcessBreathingWave( QThread ):
     def __init__( self, tsc):
