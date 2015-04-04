@@ -49,7 +49,7 @@ from common.data_storage import DataStorage
 import zephyr.message
 
 APP_NAME = _("Zephyr Biofeedback")
-VERSION = '1.0.0'
+VERSION = '0.9.0'
 
 # Activate settings with a checkbox
 DataStorage_database    = ValueProp(False)
