@@ -1,3 +1,21 @@
+"""
+ZephyrApp, a real-time plotting software for the Bioharness 3.0 device.
+Copyright (C) 2015  Darko Petrovic
+
+This program is free software; you can redistribute it and/or
+modify it under the terms of the GNU General Public License
+as published by the Free Software Foundation; either version 2
+of the License, or any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program. If not, see <http://www.gnu.org/licenses/>.
+"""
+
 import numpy as np
 import lomb
 import time
@@ -187,9 +205,10 @@ class BreathingWave( TimeSeries ):
         self.amplitude = np.array([])
         self.last_index_of_minmax = 0
 
-    def add_breath( self, value ):
+    def add_breath( self, values ):
         # The breathing data are sampled at 18 Hz (56ms)
-        self.add( value, 56 )
+        for value in values:
+            self.add( value, 56 )
 
     def computeWelchPeriodogram(self, window=60):
         """
@@ -243,35 +262,12 @@ class BreathingWave( TimeSeries ):
 class ECG( TimeSeries ):
     def __init__( self ):
         TimeSeries.__init__( self )
+        self.rpeaks_time = np.array([])
+        self.rpeaks_value = np.array([])
+        self.tpeaks_time = np.array([])
+        self.tpeaks_value = np.array([])
 
     def add_ecg( self, values ):
         #  Each ECG Waveform sample is 4ms later than the previous one.
         for value in values:
             self.add( value, 4 )
-
-
-class ProcessBreathingWave( QThread ):
-    def __init__( self, tsc):
-        QThread.__init__( self )
-        self.running = False
-        self.tsbw = tsc.ts_bw
-    def run(self):
-        self.running = True
-        minmaxarraysize = self.tsbw.minmax_val.size
-        while self.running is True:
-            time.sleep(0.3)
-            if len(self.tsbw.series) > 50:
-                # ---- Calculate interpolated signal.
-                # Variables ibwtime and ibwval are the x and y of the interpolated signal.
-                # From the interpolated signal we calculate the curve's mininum and maximum value.
-                # The values are stored in the 'minmax_time' and 'minmax_val' arrays in the second function.
-                ibwtime, ibwval = self.tsbw.interpolateSignal()
-                self.tsbw.calculateMinMax( ibwtime, ibwval )
-                if minmaxarraysize < self.tsbw.minmax_val.size:
-                    self.tsbw.amplitude = np.append(self.tsbw.amplitude, abs(self.tsbw.minmax_val[-1] - self.tsbw.minmax_val[-2]))
-                    minmaxarraysize = self.tsbw.minmax_val.size
-
-    def stop( self ):
-        self.running = False
-
-

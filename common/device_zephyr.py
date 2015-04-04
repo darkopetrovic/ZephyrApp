@@ -1,4 +1,21 @@
-#Zephyr Integration
+"""
+ZephyrApp, a real-time plotting software for the Bioharness 3.0 device.
+Copyright (C) 2015  Darko Petrovic
+
+This program is free software; you can redistribute it and/or
+modify it under the terms of the GNU General Public License
+as published by the Free Software Foundation; either version 2
+of the License, or any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program. If not, see <http://www.gnu.org/licenses/>.
+"""
+
 import zephyr
 from zephyr.collector import MeasurementCollector
 from zephyr.bioharness import BioHarnessSignalAnalysis, BioHarnessPacketHandler
@@ -13,11 +30,9 @@ import glob
 import logging
 import time
 
-# Set to FALSE to use the real data coming from the device
-VIRTUAL_SERIAL = False
-
-# Create test data and use it for the virtual serial (VIRTUAL_SERIAL must be False!)
+# Create test data and use it for the virtual serial (self.virtual_serial must be False!)
 CREATE_TEST_DATA = False
+test_data_dir = "./testdata"
 
 # A function that tries to list serial ports on most common platforms
 def list_serial_ports():
@@ -59,23 +74,23 @@ class ZephyrDevice( QThread ):
                             'RRDATA':0x19,
                             'ACC':0x1E,
                             'SUMMARY':0xBD,}
+        
+        self.virtual_serial = False
 
         zephyr.configure_root_logger()
-        if CREATE_TEST_DATA is True and VIRTUAL_SERIAL is False:
-            self.testdata_writer = MessageDataLogger("5-minutes-zephyr-stream-02")
+        if CREATE_TEST_DATA is True and self.virtual_serial is False:
+            self.testdata_writer = MessageDataLogger(test_data_dir + "/5-minutes-zephyr-stream-03")
 
-    def connectTo(self, serialport):
+    def connectTo(self, serialport, virtual=False):
         try:
-            if VIRTUAL_SERIAL is True:
-                # test_data_dir = "A:\\Projects\\ecgmuzbak\\sft\\py\\zephyr-bt\\test_data"
-                # self.ser = TimedVirtualSerial(test_data_dir + "/120-second-bt-stream.dat",
-                #                          test_data_dir + "/120-second-bt-stream-timing.csv")
-                test_data_dir = "./testdata"
-                self.ser = TimedVirtualSerial(test_data_dir + "/5-minutes-zephyr-stream-02.dat",
-                                         test_data_dir + "/5-minutes-zephyr-stream-02-timing.csv")
+            if virtual is True:
+                self.ser = TimedVirtualSerial(test_data_dir + "/5-minutes-zephyr-stream-03.dat",
+                                         test_data_dir + "/5-minutes-zephyr-stream-03-timing.csv")
                 self.connected = True
+                self.virtual_serial = True
             else:
                 self.ser = serial.Serial( serialport )
+                self.virtual_serial = False
             self.ser.close() # in case the port is already in use
             self.ser.open()
             self.initialize_device()
@@ -103,11 +118,11 @@ class ZephyrDevice( QThread ):
 
         # The delayed stream is useful to synchronize the data coming from the device
         # and provides an easy reading by sending tuples like (signal name, sample value)
-        self.delayed_stream_thread = DelayedRealTimeStream(collector, [self.callback], 5)
+        self.delayed_stream_thread = DelayedRealTimeStream(collector, [self.callback], 1)
 
         self.protocol = BioHarnessProtocol(self.ser, [message_parser.parse_data, self.create_test_data_function])
 
-        if VIRTUAL_SERIAL is False :
+        if self.virtual_serial is False :
             self.protocol.add_initilization_message( 0x0B, []) # get Serial Number
             self.connect( self, SIGNAL( 'Message' ), self._callback_serial_test )
             # by default disable every packet:
@@ -159,8 +174,8 @@ class ZephyrDevice( QThread ):
             self.prev_val = value
             self.emit( SIGNAL( 'rrinterval' ), rri_ms )
 
-        if value_name is 'breathing':
-            self.emit( SIGNAL( 'breathing_wave' ), value )
+        # if value_name is 'breathing':
+        #     self.emit( SIGNAL( 'breathing_wave' ), value )
 
         # if value_name is 'ecg':
         #     self.emit( SIGNAL( 'ecg' ), value )
@@ -173,6 +188,7 @@ class ZephyrDevice( QThread ):
 
         if value_name is 'breathing_wave_amplitude':
             self.emit( SIGNAL( 'breathing_wave_amplitude' ), value )
+            print value
 
         if value_name is 'activity':
             self.emit( SIGNAL( 'activity' ), value )
@@ -188,11 +204,11 @@ class ZephyrDevice( QThread ):
     def anyotherpackets( self, message ):
         self.emit( SIGNAL( 'Message' ), message )
 
-        # since the ecg waveform is sampled at 250 Hz, ...
         if type(message) is zephyr.message.SignalPacket and message.type == 'ecg':
             self.emit( SIGNAL( 'ecg' ), message.samples )
 
-        print message
+        if type(message) is zephyr.message.SignalPacket and message.type == 'breathing':
+            self.emit( SIGNAL( 'breathing_wave' ), message.samples )
 
     def sendmessage(self, message_id, payload):
         self.protocol.add_initilization_message(message_id, payload)
@@ -218,6 +234,6 @@ class ZephyrDevice( QThread ):
             return False
 
     def create_test_data_function(self, stream_data):
-        if CREATE_TEST_DATA is True and VIRTUAL_SERIAL is False:
+        if CREATE_TEST_DATA is True and self.virtual_serial is False:
             self.testdata_writer( stream_data )
 

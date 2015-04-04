@@ -18,7 +18,7 @@ class MessageDataLogger:
         
         delay = zephyr.time() - self.time_before
         
-        if delay > 0.01 :
+        if delay > 0.0001 :
             with open(self.log_file_basepath + "-timing.csv", "a") as timing_file:
                 timing_file.writelines("%s,%s\n" % (self.time_before, self.data_file_position))
             print self.time_before, self.data_file_position

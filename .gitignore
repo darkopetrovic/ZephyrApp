@@ -3,3 +3,6 @@ control_bioharness.py
 .idea/
 settings.ini
 noise.py
+*.pyc
+tempcode.txt
+*.pyproj
